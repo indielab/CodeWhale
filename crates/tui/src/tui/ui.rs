@@ -5363,33 +5363,45 @@ async fn switch_provider(
         })
         .await;
 
-    app.add_message(HistoryCell::System {
-        content: format!(
-            "Provider switched: {} → {}\nModel: {} → {}\nEndpoint: {}",
-            previous_provider.as_str(),
-            target.as_str(),
-            previous_model,
-            new_model,
-            new_endpoint
-        ),
-    });
-    app.status_message = Some(format!(
-        "Provider: {} via {}",
-        target.as_str(),
-        new_endpoint
-    ));
+    let persist_warning = (|| -> anyhow::Result<()> {
+        commands::persist_root_string_key(app.config_path.as_deref(), "provider", target.as_str())?;
 
-    // Persist the provider choice so it survives restarts.
-    if let Ok(mut settings) = crate::settings::Settings::load() {
+        let mut settings = crate::settings::Settings::load()?;
         settings.default_provider = Some(target.as_str().to_string());
         if model_override.is_some() {
             settings.set_model_for_provider(target.as_str(), &new_model);
             if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                let _ = settings.set("default_model", &new_model);
+                settings.set("default_model", &new_model)?;
             }
         }
-        let _ = settings.save();
+        settings.save()?;
+        Ok(())
+    })()
+    .err()
+    .map(|err| format!("Provider selection was not fully persisted: {err}"));
+
+    let mut switch_summary = format!(
+        "Provider switched: {} → {}",
+        previous_provider.as_str(),
+        target.as_str(),
+    );
+    switch_summary.push(char::from(10));
+    switch_summary.push_str(&format!("Model: {} → {}", previous_model, new_model));
+    switch_summary.push(char::from(10));
+    switch_summary.push_str(&format!("Endpoint: {}", new_endpoint));
+    if let Some(ref warning) = persist_warning {
+        switch_summary.push(char::from(10));
+        switch_summary.push_str(warning);
     }
+    app.add_message(HistoryCell::System {
+        content: switch_summary,
+    });
+
+    let mut status_message = format!("Provider: {} via {}", target.as_str(), new_endpoint);
+    if persist_warning.is_some() {
+        status_message.push_str(" (not fully persisted)");
+    }
+    app.status_message = Some(status_message);
 }
 
 fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
