@@ -155,6 +155,7 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
         {
             card.claim_pending_worker(&agent_id, AgentLifecycle::Running);
             app.subagent_card_index.insert(agent_id, idx);
+            app.bump_history_cell(idx);
         } else {
             let mut card = FanoutCard::new(
                 dispatch_kind.unwrap_or("rlm_eval").to_string(),
@@ -165,6 +166,7 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
             let idx = app.history.len().saturating_sub(1);
             app.last_fanout_card_index = Some(idx);
             app.subagent_card_index.insert(agent_id, idx);
+            app.bump_history_cell(idx);
         }
     } else {
         let card = DelegateCard::new(agent_id.clone(), agent_type.clone());

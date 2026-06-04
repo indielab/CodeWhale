@@ -18,7 +18,7 @@ use crate::tui::footer_ui::{
     friendly_subagent_progress, render_footer_from,
 };
 use crate::tui::history::{
-    ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
+    ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
 };
 use crate::tui::views::{ModalView, ViewAction};
 use crate::working_set::Workspace;
@@ -3252,6 +3252,45 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
     assert_eq!(app.session.subagent_cost, first);
     handle_subagent_mailbox(&mut app, 8, &usage);
     assert!(app.session.subagent_cost > first);
+}
+
+#[test]
+fn fanout_started_sibling_bumps_existing_card_revision() {
+    let mut app = create_test_app();
+    app.pending_subagent_dispatch = Some("rlm".to_string());
+
+    handle_subagent_mailbox(
+        &mut app,
+        1,
+        &crate::tools::subagent::MailboxMessage::Started {
+            agent_id: "fanout-a".to_string(),
+            agent_type: "default".to_string(),
+        },
+    );
+
+    let fanout_idx = app.last_fanout_card_index.expect("fanout card index");
+    let initial_revision = app.history_revisions[fanout_idx];
+
+    handle_subagent_mailbox(
+        &mut app,
+        2,
+        &crate::tools::subagent::MailboxMessage::Started {
+            agent_id: "fanout-b".to_string(),
+            agent_type: "default".to_string(),
+        },
+    );
+
+    assert_eq!(app.history.len(), 1, "sibling should reuse fanout card");
+    assert_ne!(
+        app.history_revisions[fanout_idx], initial_revision,
+        "reused fanout card must invalidate its cached transcript rows"
+    );
+    match &app.history[fanout_idx] {
+        HistoryCell::SubAgent(SubAgentCell::Fanout(card)) => {
+            assert_eq!(card.worker_count(), 2);
+        }
+        cell => panic!("expected fanout card, got {cell:?}"),
+    }
 }
 
 #[test]
