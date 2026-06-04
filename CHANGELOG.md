@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoint instead of ending as a null failed result, and `agent_eval` can
   explicitly continue a live checkpointed interrupted child while normal
   completed/failed/cancelled follow-up behavior stays unchanged (#2029).
+- Durable task recovery no longer requeues tasks that were `running` when the
+  previous CodeWhale process exited. On restart those records are marked failed
+  with a recovery note, and any running tool-call summaries are marked failed
+  too, so stale shell/task state cannot silently become live work again (#1786).
 - Auto-generated project instructions now reuse the bounded Project Context
   Pack data instead of running an unbounded summary/tree scan when no
   `.codewhale/instructions.md` file exists. The fallback keeps later
@@ -104,6 +108,7 @@ dense tool-call transcript collapse/sidebar detail direction (#2738, #2734,
 **@h3c-hexin** for the tool-agent model inheritance and configured
 `skills_dir` fixes (#2736, #2737). Thanks also to **@qiyuanlicn** for the
 checkpoint/resume report that shaped the sub-agent recovery slice (#2029),
+to **@bevis-wong** for the long-running shell/task liveness report (#1786),
 and to **@NASLXTO** and
 **@wuxixing** for the large-workspace startup reports (#697, #1827), and to
 **@linzhiqin2003** and **@merchloubna70-dot** for earlier context-cap and
