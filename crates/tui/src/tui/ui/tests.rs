@@ -2612,6 +2612,121 @@ exit 2
 }
 
 #[test]
+fn resume_message_helper_is_strict() {
+    for message in [
+        "continue",
+        "resume",
+        "please continue",
+        "continue the paused command",
+        "can you resume the paused task",
+        "go ahead and resume",
+    ] {
+        assert!(is_resume_message(message), "expected resume: {message}");
+    }
+
+    for message in [
+        "don't continue yet",
+        "do not resume yet",
+        "I will resume tomorrow",
+        "we can continue tomorrow",
+        "continue later",
+        "how do I resume a git cherry-pick?",
+        "please do not continue",
+    ] {
+        assert!(
+            !is_resume_message(message),
+            "expected not resume: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dispatch_non_resume_message_preserves_paused_command_state() {
+    let mut app = create_test_app();
+    app.pausable = true;
+    app.paused = true;
+    app.paused_quarry = Some("Scan nested git repositories".to_string());
+    app.hunt.quarry = Some("Scan nested git repositories".to_string());
+    let mut engine = mock_engine_handle();
+    engine.handle.set_paused(true);
+    let config = Config::default();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("how are you?".to_string(), None),
+    )
+    .await
+    .expect("dispatch user message");
+
+    assert!(!app.paused);
+    assert!(app.pausable);
+    assert_eq!(
+        app.paused_quarry.as_deref(),
+        Some("Scan nested git repositories")
+    );
+    assert!(app.hunt.quarry.is_none());
+    assert!(!engine.handle.is_paused());
+    match engine.rx_op.recv().await.expect("send message op") {
+        crate::core::ops::Op::SendMessage {
+            content,
+            goal_objective,
+            ..
+        } => {
+            assert!(goal_objective.is_none());
+            assert!(content.contains("Paused custom slash command: Scan nested git repositories"));
+            assert!(content.contains("do not continue the paused command"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_resume_message_restores_paused_command_goal() {
+    let mut app = create_test_app();
+    app.pausable = true;
+    app.paused = true;
+    app.paused_quarry = Some("Scan nested git repositories".to_string());
+    let mut engine = mock_engine_handle();
+    engine.handle.set_paused(true);
+    let config = Config::default();
+
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("please continue the paused command".to_string(), None),
+    )
+    .await
+    .expect("dispatch user message");
+
+    assert!(!app.paused);
+    assert!(app.pausable);
+    assert!(app.paused_quarry.is_none());
+    assert_eq!(
+        app.hunt.quarry.as_deref(),
+        Some("Scan nested git repositories")
+    );
+    assert!(!engine.handle.is_paused());
+    match engine.rx_op.recv().await.expect("send message op") {
+        crate::core::ops::Op::SendMessage {
+            content,
+            goal_objective,
+            ..
+        } => {
+            assert_eq!(
+                goal_objective.as_deref(),
+                Some("Scan nested git repositories")
+            );
+            assert!(content.contains("Paused custom slash command: Scan nested git repositories"));
+            assert!(content.contains("Continue the paused command"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+}
+
+#[test]
 fn turn_liveness_watchdog_clears_stale_dispatch() {
     let mut app = create_test_app();
     app.is_loading = true;
@@ -4244,6 +4359,28 @@ fn test_esc_priority_order_matches_cancel_stack() {
 
     app.queued_draft = None;
     assert_eq!(next_escape_action(&app, false), EscapeAction::Noop);
+}
+
+#[test]
+fn next_escape_action_pauses_then_cancels_pausable_command() {
+    let mut app = create_test_app();
+    app.is_loading = true;
+    app.pausable = true;
+    app.paused = false;
+
+    assert_eq!(next_escape_action(&app, false), EscapeAction::PauseCommand);
+
+    app.paused = true;
+    assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
+
+    app.is_loading = false;
+    app.paused = false;
+    app.pausable = true;
+    app.paused_quarry = Some("Scan repos".to_string());
+    assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
+
+    app.is_loading = true;
+    assert_eq!(next_escape_action(&app, false), EscapeAction::CancelRequest);
 }
 
 #[test]

@@ -1259,6 +1259,14 @@ impl Engine {
             }
 
             // Execute tools
+            if self.shared_paused.lock().is_ok_and(|paused| *paused) {
+                let _ = self
+                    .tx_event
+                    .send(Event::status("Request was Paused"))
+                    .await;
+                return (TurnOutcomeStatus::Interrupted, None);
+            }
+
             let tool_exec_lock = self.tool_exec_lock.clone();
             let mcp_pool = if tool_uses
                 .iter()

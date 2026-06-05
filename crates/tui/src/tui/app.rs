@@ -1242,6 +1242,12 @@ pub struct App {
     /// Active tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub active_allowed_tools: Option<Vec<String>>,
+    /// True when the active custom slash command opted into pause/resume.
+    pub pausable: bool,
+    /// True after Esc paused a pausable command and before it is resumed or cancelled.
+    pub paused: bool,
+    /// Saved custom-command objective while the command is paused.
+    pub paused_quarry: Option<String>,
     pub history: Vec<HistoryCell>,
     pub history_version: u64,
     /// Per-cell revision counter, kept in lockstep with `history`.
@@ -2065,6 +2071,9 @@ impl App {
             hunt: HuntState::default(),
             session: SessionState::default(),
             active_allowed_tools: None,
+            pausable: false,
+            paused: false,
+            paused_quarry: None,
             history: Vec::new(),
             history_version: 0,
             history_revisions: Vec::new(),

@@ -484,6 +484,8 @@ pub struct EngineHandle {
     tx_user_input: mpsc::Sender<UserInputDecision>,
     /// Send steer input for an in-flight turn.
     tx_steer: mpsc::Sender<String>,
+    /// Shared pause flag set by the TUI and read by the turn loop.
+    shared_paused: Arc<StdMutex<bool>>,
 }
 
 // `impl EngineHandle { ... }` moved to `engine/handle.rs` so the
@@ -557,6 +559,8 @@ pub struct Engine {
     /// four TUI / command consumers; the cache turns N×O(messages) walks
     /// into a single recompute on a content change.
     token_estimate_cache: TokenEstimateCache,
+    /// Shared pause flag set by the TUI and read before tool execution.
+    shared_paused: Arc<StdMutex<bool>>,
 }
 
 // === Internal tool helpers ===
@@ -579,6 +583,10 @@ impl Engine {
         match self.cancel_reason.lock() {
             Ok(mut slot) => *slot = None,
             Err(poisoned) => *poisoned.into_inner() = None,
+        }
+        match self.shared_paused.lock() {
+            Ok(mut paused) => *paused = false,
+            Err(poisoned) => *poisoned.into_inner() = false,
         }
     }
 
@@ -646,6 +654,7 @@ impl Engine {
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
+        let shared_paused = Arc::new(StdMutex::new(false));
         let tool_exec_lock = Arc::new(RwLock::new(()));
 
         // Create clients for both providers
@@ -808,6 +817,7 @@ impl Engine {
             sandbox_backend,
             current_mode: AppMode::Agent,
             token_estimate_cache: TokenEstimateCache::new(),
+            shared_paused: shared_paused.clone(),
         };
         engine.rehydrate_latest_canonical_state();
 
@@ -819,6 +829,7 @@ impl Engine {
             tx_approval,
             tx_user_input,
             tx_steer,
+            shared_paused,
         };
 
         (engine, handle)
@@ -2791,6 +2802,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     let cancel_token = CancellationToken::new();
     let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
     let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
+    let shared_paused = Arc::new(StdMutex::new(false));
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
@@ -2799,6 +2811,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         tx_approval,
         tx_user_input,
         tx_steer,
+        shared_paused,
     };
 
     MockEngineHandle {

@@ -6,7 +6,7 @@
 //! `/name`, the file contents are sent as a user message.
 //!
 //! Files may include optional YAML-like frontmatter between `---` markers.
-//! Supported fields are `description`, `argument-hint`, and `allowed-tools`.
+//! Supported fields are `description`, `argument-hint`, `allowed-tools`, and `pausable`.
 //! Frontmatter is stripped before the command body is sent to the model.
 //!
 //! ## Precedence
@@ -206,6 +206,9 @@ pub fn try_dispatch_user_command(app: &mut App, input: &str) -> Option<CommandRe
             app.hunt.verdict = HuntVerdict::Hunting;
             app.hunt.token_budget = None;
             app.active_allowed_tools = None;
+            app.pausable = false;
+            app.paused = false;
+            app.paused_quarry = None;
             for (key, value) in &metadata {
                 match key.as_str() {
                     "description" => {
@@ -214,6 +217,9 @@ pub fn try_dispatch_user_command(app: &mut App, input: &str) -> Option<CommandRe
                     }
                     "allowed-tools" => {
                         app.active_allowed_tools = Some(parse_allowed_tools(value));
+                    }
+                    "pausable" => {
+                        app.pausable = value.trim().eq_ignore_ascii_case("true");
                     }
                     _ => {}
                 }
@@ -559,6 +565,84 @@ mod tests {
             app.active_allowed_tools,
             Some(vec!["bash".to_string(), "grep".to_string()])
         );
+    }
+
+    #[test]
+    fn pausable_frontmatter_sets_app_state_without_worktree_mutation() {
+        use crate::config::Config;
+
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let init = std::process::Command::new("git")
+            .args(["-C", ws.to_str().unwrap(), "init"])
+            .output()
+            .expect("git init");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        std::fs::write(ws.join("user-work.txt"), "untracked user work").unwrap();
+        write_command(
+            &ws.join(".codewhale").join("commands"),
+            "pause-scan",
+            "---\ndescription: Scan repos\npausable: true\n---\nscan",
+        );
+
+        let mut app = App::new(test_options(ws.clone()), &Config::default());
+        let _ = try_dispatch_user_command(&mut app, "/pause-scan").unwrap();
+
+        assert!(app.pausable);
+        assert!(!app.paused);
+        assert!(app.paused_quarry.is_none());
+        assert!(ws.join("user-work.txt").exists());
+        let stash = std::process::Command::new("git")
+            .args(["-C", ws.to_str().unwrap(), "stash", "list"])
+            .output()
+            .expect("git stash list");
+        assert!(
+            stash.status.success(),
+            "git stash list failed: {}",
+            String::from_utf8_lossy(&stash.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&stash.stdout).trim().is_empty(),
+            "pausable dispatch must not create git stash entries"
+        );
+    }
+
+    #[test]
+    fn new_user_command_clears_stale_paused_state() {
+        use crate::config::Config;
+
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let commands_dir = ws.join(".codewhale").join("commands");
+        write_command(
+            &commands_dir,
+            "pause-scan",
+            "---\ndescription: Scan repos\npausable: true\n---\nscan",
+        );
+        write_command(&commands_dir, "plain", "plain command");
+
+        let mut app = App::new(test_options(ws), &Config::default());
+        let _ = try_dispatch_user_command(&mut app, "/pause-scan").unwrap();
+        app.paused = true;
+        app.paused_quarry = Some("Scan repos".to_string());
+
+        let _ = try_dispatch_user_command(&mut app, "/plain").unwrap();
+
+        assert!(!app.pausable);
+        assert!(!app.paused);
+        assert!(app.paused_quarry.is_none());
     }
 
     #[test]

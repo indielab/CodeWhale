@@ -1697,6 +1697,10 @@ async fn run_event_loop(
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
                         app.suppress_stream_events_until_turn_complete = false;
                         app.active_allowed_tools = None;
+                        if app.paused_quarry.is_none() {
+                            app.pausable = false;
+                            app.paused = false;
+                        }
                         if !matches!(status, crate::core::events::TurnOutcomeStatus::Completed)
                             || draws_since_last_full_repaint >= PERIODIC_FULL_REPAINT_EVERY_N
                         {
@@ -3539,10 +3543,31 @@ async fn run_event_loop(
                         }
                         EscapeAction::CancelRequest => {
                             app.backtrack.reset();
-                            engine_handle.cancel();
-                            mark_active_turn_cancelled_locally(app);
-                            current_streaming_text.clear();
-                            app.status_message = Some("Request cancelled".to_string());
+                            if app.paused || app.paused_quarry.is_some() {
+                                clear_paused_command_state(app, &engine_handle);
+                                if app.is_loading
+                                    || matches!(
+                                        app.runtime_turn_status.as_deref(),
+                                        Some("in_progress")
+                                    )
+                                {
+                                    engine_handle.cancel();
+                                    mark_active_turn_cancelled_locally(app);
+                                    current_streaming_text.clear();
+                                }
+                                app.active_allowed_tools = None;
+                                app.hunt.quarry = None;
+                                app.status_message = Some("Paused command cancelled".to_string());
+                            } else {
+                                engine_handle.cancel();
+                                mark_active_turn_cancelled_locally(app);
+                                current_streaming_text.clear();
+                                app.status_message = Some("Request cancelled".to_string());
+                            }
+                        }
+                        EscapeAction::PauseCommand => {
+                            app.backtrack.reset();
+                            pause_pausable_command(app, &engine_handle);
                         }
                         EscapeAction::DiscardQueuedDraft => {
                             app.backtrack.reset();
@@ -4948,6 +4973,149 @@ fn queued_message_content_for_app(
     }
 }
 
+fn paused_quarry_title(quarry: &str) -> &str {
+    quarry
+        .split(['\n', '\r'])
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("the paused command")
+}
+
+fn is_resume_message(message: &str) -> bool {
+    let words: Vec<String> = message
+        .to_ascii_lowercase()
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect();
+    if words.is_empty() {
+        return false;
+    }
+    let text = words.join(" ");
+    let has_resume_verb = words
+        .iter()
+        .any(|word| matches!(word.as_str(), "continue" | "resume"));
+    if !has_resume_verb {
+        return false;
+    }
+
+    let blockers = [
+        "do not continue",
+        "do not resume",
+        "don t continue",
+        "don t resume",
+        "dont continue",
+        "dont resume",
+        "not continue",
+        "not resume",
+        "continue yet",
+        "resume yet",
+        "will continue",
+        "will resume",
+        "continue tomorrow",
+        "resume tomorrow",
+        "continue later",
+        "resume later",
+    ];
+    if blockers.iter().any(|blocker| text.contains(blocker)) {
+        return false;
+    }
+    if matches!(
+        words.first().map(String::as_str),
+        Some("how" | "what" | "when" | "where" | "why")
+    ) {
+        return false;
+    }
+
+    if words.len() == 1 {
+        return true;
+    }
+
+    let context_words = [
+        "please", "now", "paused", "pause", "command", "task", "work", "request", "goal",
+        "previous", "last", "same", "it", "that", "this", "go", "ahead",
+    ];
+    if words
+        .iter()
+        .any(|word| context_words.contains(&word.as_str()))
+    {
+        return true;
+    }
+
+    text.starts_with("can you continue")
+        || text.starts_with("can you resume")
+        || text.starts_with("could you continue")
+        || text.starts_with("could you resume")
+}
+
+fn paused_command_note(title: &str, resume: bool) -> String {
+    let instruction = if resume {
+        "The user is resuming that paused command. Continue the paused command."
+    } else {
+        "The user is not resuming that paused command. Answer only the new message and do not continue the paused command."
+    };
+    format!(
+        "\n\n<runtime_prompt visibility=\"internal\">\n\
+Paused custom slash command: {title}\n\
+{instruction}\n\
+</runtime_prompt>"
+    )
+}
+
+fn prepare_paused_command_message(
+    app: &mut App,
+    engine_handle: &EngineHandle,
+    user_message: &str,
+) -> Option<String> {
+    if !app.paused && app.paused_quarry.is_none() {
+        engine_handle.set_paused(false);
+        return None;
+    }
+
+    engine_handle.set_paused(false);
+    app.paused = false;
+
+    let Some(quarry) = app
+        .paused_quarry
+        .clone()
+        .or_else(|| app.hunt.quarry.clone())
+    else {
+        app.pausable = false;
+        return None;
+    };
+    let title = paused_quarry_title(&quarry).to_string();
+    if is_resume_message(user_message) {
+        app.hunt.quarry = Some(app.paused_quarry.take().unwrap_or(quarry));
+        app.pausable = true;
+        Some(paused_command_note(&title, true))
+    } else {
+        app.hunt.quarry = None;
+        Some(paused_command_note(&title, false))
+    }
+}
+
+fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
+    app.paused_quarry = app
+        .paused_quarry
+        .clone()
+        .or_else(|| app.hunt.quarry.clone());
+    app.hunt.quarry = None;
+    app.paused = true;
+    app.pausable = true;
+    engine_handle.set_paused(true);
+    app.status_message = Some(
+        "Request paused. Send `continue` or `resume` to continue, or Esc to cancel.".to_string(),
+    );
+}
+
+fn clear_paused_command_state(app: &mut App, engine_handle: &EngineHandle) {
+    app.pausable = false;
+    app.paused = false;
+    app.paused_quarry = None;
+    engine_handle.set_paused(false);
+}
+
 async fn dispatch_user_message(
     app: &mut App,
     config: &Config,
@@ -4984,6 +5152,8 @@ async fn dispatch_user_message(
         }
     }
 
+    let paused_note = prepare_paused_command_message(app, engine_handle, &message.display);
+
     // Set immediately to prevent double-dispatch before TurnStarted event arrives.
     let dispatch_started_at = Instant::now();
     app.is_loading = true;
@@ -5001,7 +5171,10 @@ async fn dispatch_user_message(
         &app.workspace,
         cwd.clone(),
     );
-    let content = queued_message_content_for_app(app, &message, cwd);
+    let mut content = queued_message_content_for_app(app, &message, cwd);
+    if let Some(note) = paused_note.as_deref() {
+        content.push_str(note);
+    }
     let message_index = app.api_messages.len();
     app.system_prompt = Some(
         prompts::system_prompt_for_mode_with_context_skills_and_session(
@@ -6405,13 +6578,17 @@ async fn steer_user_message(
     engine_handle: &EngineHandle,
     message: QueuedMessage,
 ) -> Result<()> {
+    let paused_note = prepare_paused_command_message(app, engine_handle, &message.display);
     let cwd = std::env::current_dir().ok();
     let references = crate::tui::file_mention::context_references_from_input(
         &message.display,
         &app.workspace,
         cwd.clone(),
     );
-    let content = queued_message_content_for_app(app, &message, cwd);
+    let mut content = queued_message_content_for_app(app, &message, cwd);
+    if let Some(note) = paused_note.as_deref() {
+        content.push_str(note);
+    }
     let message_index = app.api_messages.len();
 
     engine_handle.steer(content.clone()).await?;
