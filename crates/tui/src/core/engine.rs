@@ -1708,18 +1708,19 @@ In {new} mode: {policy}\n\n\
                     } else {
                         None
                     };
-                    let Some(subagent_runtime) = runtime else {
+                    if let Some(subagent_runtime) = runtime {
+                        Some(
+                            builder
+                                .with_subagent_tools(
+                                    self.subagent_manager.clone(),
+                                    subagent_runtime,
+                                )
+                                .build(tool_context),
+                        )
+                    } else {
                         tracing::warn!("Sub-agents enabled but no API client available, falling back to basic tool set");
-                        return Some(builder.build(tool_context));
-                    };
-                    Some(
-                        builder
-                            .with_subagent_tools(
-                                self.subagent_manager.clone(),
-                                subagent_runtime,
-                            )
-                            .build(tool_context),
-                    )
+                        Some(builder.build(tool_context))
+                    }
                 } else {
                     Some(builder.build(tool_context))
                 }
@@ -2537,9 +2538,9 @@ fn goal_objective_for_prompt(
     match goal_state.lock() {
         Ok(state) => {
             if let Some(objective) = state.objective() {
-                if state.is_active() {
-                    return Some(objective.to_string());
-                }
+                // Preserve original behavior: return None (not fallback) when
+                // objective exists but goal is inactive.
+                return state.is_active().then(|| objective.to_string());
             }
         }
         Err(err) => tracing::warn!("goal state lock poisoned while building prompt: {err}"),
