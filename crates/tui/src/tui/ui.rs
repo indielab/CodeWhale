@@ -2554,7 +2554,8 @@ async fn run_event_loop(
                                 blocked_network,
                                 blocked_write,
                             );
-                            app.view_stack.push(ElevationView::new(request));
+                            app.view_stack
+                                .push(ElevationView::new(request, app.ui_locale));
                             if let Some((method, _, _)) =
                                 crate::tui::notifications::settings(config)
                             {
