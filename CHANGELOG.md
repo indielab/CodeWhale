@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Localized config section labels (#2918).** The interactive config view now
   localizes section and session/saved scope labels while preserving English
   search terms. Thanks @gordonlu for the PR.
+- **Localized config editor labels (#2919).** The config editor modal now
+  localizes edit labels, default/unavailable placeholders, and effective
+  currency hints. Thanks @gordonlu for the PR.
 
 ### Fixed
 
