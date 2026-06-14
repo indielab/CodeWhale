@@ -40,6 +40,7 @@ mod eval;
 mod execpolicy;
 mod features;
 mod fleet;
+mod goal_loop;
 mod handoff;
 mod hooks;
 mod llm_client;
