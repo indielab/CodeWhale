@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sub-agent fanout safeguards (#3318, #3319).** High-fanout Workflow runs can
+  now set `[subagents] max_admitted` to queue and drain more agents than the
+  instantaneous concurrency cap, while `[subagents] token_budget` applies a
+  shared aggregate token ceiling to a root `agent` run and its descendants.
+
+### Fixed
+
+- **Legacy app-server non-loopback auth hardening (#3258).** Bare
+  `codewhale app-server --host 0.0.0.0` now fails fast unless an explicit
+  `--auth-token` or `CODEWHALE_APP_SERVER_TOKEN` is supplied, keeping generated
+  one-time `cwapp_*` tokens loopback-only.
+
 ## [0.8.62] - 2026-06-17
 
 ### Changed
