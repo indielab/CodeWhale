@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -44,6 +45,86 @@ DEFAULT_TASKS = [
 ]
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/beta"
 EXPLICIT_REASONING_EFFORTS = ("off", "high", "max")
+FAILURE_CLASSES = (
+    "solved",
+    "model_wrong_answer",
+    "tool_policy_loop",
+    "artifact_incompatible",
+    "setup_timeout",
+    "background_not_ready",
+    "verifier_environment_failure",
+    "context_exhaustion",
+    "harness_exception",
+)
+HARNESS_TIMEOUTS = {
+    "default_command_s": 30,
+    "build_command_s": 300,
+    "background_start_s": 600,
+    "readiness_probe_s": 120,
+    "verifier_s": 900,
+}
+ARTIFACT_PREFLIGHT_COMMANDS = [
+    "codewhale --version",
+    'ldd "$(command -v codewhale)"',
+    "/lib/x86_64-linux-gnu/libc.so.6 || true",
+]
+TASK_READINESS_PROBES = {
+    "configure-git-webserver": (
+        "curl -fsS http://127.0.0.1:8080/ >/dev/null && "
+        "rm -rf /tmp/codewhale-readiness-git-probe && "
+        "git clone http://127.0.0.1:8080/repo.git /tmp/codewhale-readiness-git-probe"
+    ),
+    "qemu-alpine-ssh": (
+        "timeout 20 bash -lc 'printf \"\\n\" | nc -w 5 127.0.0.1 6665 | "
+        "grep -Ei \"login:|localhost login\"'"
+    ),
+    "qemu-startup": (
+        "timeout 20 bash -lc 'printf \"\\n\" | nc -w 5 127.0.0.1 6665 | "
+        "grep -Ei \"login:|localhost login\"'"
+    ),
+}
+KNOWN_MODEL_TOOLS = (
+    "grep_files",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "exec_shell",
+    "apply_patch",
+    "list_dir",
+    "find_files",
+)
+TOOL_POLICY_LOOP_THRESHOLD = 3
+DENIAL_TERMS = (
+    "denied",
+    "not allowed",
+    "not available",
+    "blocked",
+    "forbidden",
+    "tool policy",
+    "use a different tool",
+    "stop using",
+)
+ARTIFACT_INCOMPATIBLE_RE = re.compile(
+    r"artifact_incompatible|error while loading shared libraries|"
+    r"glibc_[0-9]|version `?glibc|version .* not found|"
+    r"libssl[^\\n]*not found|libcrypto[^\\n]*not found|libdbus[^\\n]*not found|"
+    r"openssl[^\\n]*(?:not found|incompatible)",
+    re.IGNORECASE,
+)
+BACKGROUND_NOT_READY_RE = re.compile(
+    r"background_not_ready|readiness probe failed|timed out waiting for .*ready|"
+    r"connection refused|service .*not ready",
+    re.IGNORECASE,
+)
+VERIFIER_ENVIRONMENT_RE = re.compile(
+    r"verifier_environment_failure|verifier .*environment|grader .*environment|"
+    r"tests?/verify\\.sh: .*not found|pytest: command not found",
+    re.IGNORECASE,
+)
+CONTEXT_EXHAUSTION_RE = re.compile(
+    r"context_exhaustion|context window|maximum context|token limit|context length",
+    re.IGNORECASE,
+)
 
 
 def stable_path(path: Path) -> str:
@@ -59,6 +140,26 @@ def provider_from_model(model: str) -> str:
 
 def label_for_model(model: str, reasoning_effort: str | None) -> str:
     return f"{model}@{reasoning_effort or 'default'}"
+
+
+def readiness_probe_for_task(task: str | None) -> str | None:
+    if not task:
+        return None
+    normalized = task.strip().lower()
+    for task_key, probe in TASK_READINESS_PROBES.items():
+        if task_key in normalized:
+            return probe
+    return None
+
+
+def task_harness_metadata(tasks: list[str]) -> dict[str, dict[str, Any]]:
+    return {
+        task: {
+            "readiness_probe": readiness_probe_for_task(task),
+            "timeout_policy": HARNESS_TIMEOUTS,
+        }
+        for task in tasks
+    }
 
 
 def env_key_for_provider(provider: str) -> str:
@@ -254,6 +355,36 @@ def walk_usage(obj: Any, row: dict[str, Any]) -> None:
             walk_usage(item, row)
 
 
+def denied_tool_counts(text: str) -> dict[str, int]:
+    counts = {tool: 0 for tool in KNOWN_MODEL_TOOLS}
+    for line in text.splitlines():
+        lowered = line.lower()
+        if not any(term in lowered for term in DENIAL_TERMS):
+            continue
+        for tool in KNOWN_MODEL_TOOLS:
+            if tool in lowered:
+                counts[tool] += 1
+    return {tool: count for tool, count in counts.items() if count > 0}
+
+
+def merge_denied_tool_counts(row: dict[str, Any], counts: dict[str, int]) -> None:
+    if not counts:
+        return
+    existing = row.get("denied_tool_counts")
+    if not isinstance(existing, dict):
+        existing = {}
+        row["denied_tool_counts"] = existing
+    for tool, count in counts.items():
+        existing[tool] = int(existing.get(tool, 0)) + count
+
+
+def read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
 def parse_agent_log(path: Path, row: dict[str, Any]) -> None:
     try:
         text = path.read_text(errors="replace")
@@ -261,6 +392,7 @@ def parse_agent_log(path: Path, row: dict[str, Any]) -> None:
         return
     row["transcript_path"] = stable_path(path)
     row["transcript_bytes"] = len(text.encode("utf-8", errors="replace"))
+    merge_denied_tool_counts(row, denied_tool_counts(text))
     for line in text.splitlines():
         stripped = line.strip()
         json_start = stripped.find("{")
@@ -289,6 +421,59 @@ def parse_exception(exception_info: Any) -> str | None:
     return str(exception_info)
 
 
+def classify_failure(row: dict[str, Any]) -> str:
+    reward = row.get("reward")
+    if isinstance(reward, (int, float)) and reward >= 1.0:
+        return "solved"
+
+    evidence = "\n".join(
+        str(row.get(key) or "")
+        for key in (
+            "exception",
+            "verifier_exception",
+            "artifact_preflight_excerpt",
+            "background_error",
+            "transcript_excerpt",
+        )
+    )
+    if ARTIFACT_INCOMPATIBLE_RE.search(evidence):
+        return "artifact_incompatible"
+
+    denied_counts = row.get("denied_tool_counts")
+    if isinstance(denied_counts, dict):
+        repeated = [
+            (tool, int(count))
+            for tool, count in denied_counts.items()
+            if isinstance(count, int) and count >= TOOL_POLICY_LOOP_THRESHOLD
+        ]
+        if repeated:
+            tool, count = sorted(repeated, key=lambda item: (-item[1], item[0]))[0]
+            row["denied_tool"] = tool
+            row["denied_tool_repeat_count"] = count
+            return "tool_policy_loop"
+
+    if BACKGROUND_NOT_READY_RE.search(evidence):
+        return "background_not_ready"
+    if VERIFIER_ENVIRONMENT_RE.search(evidence):
+        return "verifier_environment_failure"
+    if CONTEXT_EXHAUSTION_RE.search(evidence):
+        return "context_exhaustion"
+    if "timeout" in evidence.lower() or "timed out" in evidence.lower():
+        return "setup_timeout"
+    if row.get("exception") or row.get("verifier_exception"):
+        return "harness_exception"
+    return "model_wrong_answer"
+
+
+def short_excerpt(text: str, max_chars: int = 1200) -> str | None:
+    clean = text.strip()
+    if not clean:
+        return None
+    if len(clean) <= max_chars:
+        return clean
+    return clean[: max_chars - 3] + "..."
+
+
 def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None) -> dict[str, Any] | None:
     data = json_load(trial_dir / "result.json")
     if data is None or "task_name" not in data:
@@ -303,6 +488,12 @@ def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None
         "trial_dir": stable_path(trial_dir),
         "reward": rewards.get("reward"),
         "exception": parse_exception(data.get("exception_info")),
+        "verifier_exception": parse_exception(verifier.get("exception_info")),
+        "failure_class": None,
+        "readiness_probe": readiness_probe_for_task(str(data.get("task_name") or "")),
+        "denied_tool": None,
+        "denied_tool_repeat_count": 0,
+        "denied_tool_counts": {},
         "runtime_s": seconds_between(data.get("started_at"), data.get("finished_at")),
         "input_tokens": agent_result.get("n_input_tokens"),
         "cached_tokens": agent_result.get("n_cache_tokens"),
@@ -311,6 +502,9 @@ def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None
         "cost_usd": agent_result.get("cost_usd"),
         "transcript_path": None,
         "transcript_bytes": None,
+        "artifact_preflight_path": None,
+        "artifact_preflight_excerpt": None,
+        "harness_note_path": None,
     }
     for log_name in (
         "codewhale.txt",
@@ -323,11 +517,22 @@ def parse_trial(trial_dir: Path, model: str, reasoning_effort: str | None = None
         if log_path.exists():
             parse_agent_log(log_path, row)
             break
+    preflight_path = trial_dir / "agent" / "codewhale-artifact-preflight.txt"
+    preflight_text = read_text_if_exists(preflight_path)
+    if preflight_text:
+        row["artifact_preflight_path"] = stable_path(preflight_path)
+        row["artifact_preflight_excerpt"] = short_excerpt(preflight_text)
+    harness_note_path = trial_dir / "agent" / "codewhale-harness-note.txt"
+    if harness_note_path.exists():
+        row["harness_note_path"] = stable_path(harness_note_path)
     metadata = agent_result.get("metadata")
     if isinstance(metadata, dict) and row.get("reasoning_tokens") is None:
         reasoning_tokens = metadata.get("reasoning_tokens")
         if isinstance(reasoning_tokens, (int, float)):
             row["reasoning_tokens"] = reasoning_tokens
+        if row.get("readiness_probe") is None and isinstance(metadata.get("readiness_probe"), str):
+            row["readiness_probe"] = metadata.get("readiness_probe")
+    row["failure_class"] = classify_failure(row)
     return row
 
 
@@ -375,6 +580,10 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for model, model_rows in sorted(groups.items()):
         rewards = [float(r["reward"]) for r in model_rows if isinstance(r.get("reward"), (int, float))]
         runtimes = [float(r["runtime_s"]) for r in model_rows if isinstance(r.get("runtime_s"), (int, float))]
+        failure_classes: dict[str, int] = {}
+        for row in model_rows:
+            failure_class = str(row.get("failure_class") or "harness_exception")
+            failure_classes[failure_class] = failure_classes.get(failure_class, 0) + 1
         out.append(
             {
                 "model": model,
@@ -382,6 +591,7 @@ def aggregate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "solved": sum(1 for reward in rewards if reward >= 1.0),
                 "mean_reward": round(sum(rewards) / len(rewards), 4) if rewards else None,
                 "exceptions": sum(1 for row in model_rows if row.get("exception")),
+                "failure_classes": failure_classes,
                 "mean_runtime_s": round(sum(runtimes) / len(runtimes), 2) if runtimes else None,
                 "input_tokens": sum(int(r.get("input_tokens") or 0) for r in model_rows) or None,
                 "cached_tokens": sum(int(r.get("cached_tokens") or 0) for r in model_rows) or None,
@@ -397,27 +607,39 @@ def markdown(rows: list[dict[str, Any]], aggregates: list[dict[str, Any]]) -> st
     lines = ["# CodeWhale Terminal-Bench Summary", ""]
     lines.append("## Aggregate")
     lines.append("")
-    lines.append("| model | trials | solved | mean reward | exceptions | mean runtime s | input tokens | output tokens | reasoning tokens | cost usd |")
-    lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+    lines.append("| model | trials | solved | mean reward | exceptions | failure classes | mean runtime s | input tokens | output tokens | reasoning tokens | cost usd |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |")
     for row in aggregates:
+        rendered = {k: ("null" if v is None else v) for k, v in row.items()}
+        rendered["failure_classes"] = json.dumps(
+            row.get("failure_classes") or {},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         lines.append(
-            "| {model} | {trials} | {solved} | {mean_reward} | {exceptions} | {mean_runtime_s} | {input_tokens} | {output_tokens} | {reasoning_tokens} | {cost_usd} |".format(
-                **{k: ("null" if v is None else v) for k, v in row.items()}
+            "| {model} | {trials} | {solved} | {mean_reward} | {exceptions} | {failure_classes} | {mean_runtime_s} | {input_tokens} | {output_tokens} | {reasoning_tokens} | {cost_usd} |".format(
+                **rendered
             )
         )
     lines.extend(["", "## Per Task", ""])
-    lines.append("| model | effort | task | reward | exception | runtime s | input tokens | output tokens | transcript |")
-    lines.append("| --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- |")
+    lines.append("| model | effort | task | reward | failure class | denied tool | exception | runtime s | input tokens | output tokens | transcript |")
+    lines.append("| --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | --- |")
     for row in sorted(rows, key=lambda r: (str(r.get("model")), str(r.get("task")))):
         exception = str(row.get("exception") or "")
         if len(exception) > 90:
             exception = exception[:87] + "..."
+        denied_tool = row.get("denied_tool") or ""
+        repeat_count = row.get("denied_tool_repeat_count") or 0
+        if denied_tool and repeat_count:
+            denied_tool = f"{denied_tool} x{repeat_count}"
         lines.append(
-            "| {model} | {reasoning_effort} | {task} | {reward} | {exception} | {runtime_s} | {input_tokens} | {output_tokens} | {transcript_path} |".format(
+            "| {model} | {reasoning_effort} | {task} | {reward} | {failure_class} | {denied_tool} | {exception} | {runtime_s} | {input_tokens} | {output_tokens} | {transcript_path} |".format(
                 model=row.get("model"),
                 reasoning_effort=row.get("reasoning_effort") or "default",
                 task=row.get("task"),
                 reward="null" if row.get("reward") is None else row.get("reward"),
+                failure_class=row.get("failure_class") or "",
+                denied_tool=str(denied_tool).replace("|", "\\|"),
                 exception=exception.replace("|", "\\|"),
                 runtime_s="null" if row.get("runtime_s") is None else row.get("runtime_s"),
                 input_tokens="null" if row.get("input_tokens") is None else row.get("input_tokens"),
@@ -454,6 +676,10 @@ def run_matrix(args: argparse.Namespace, env: dict[str, str]) -> Path:
         "agent_import_path": args.agent_import_path,
         "linux_bin": str(args.linux_bin) if args.linux_bin else None,
         "tui_linux_bin": str(args.tui_linux_bin) if args.tui_linux_bin else None,
+        "artifact_preflight_commands": ARTIFACT_PREFLIGHT_COMMANDS,
+        "failure_classes": list(FAILURE_CLASSES),
+        "harness_timeouts": HARNESS_TIMEOUTS,
+        "task_harness": task_harness_metadata(args.tasks),
         "credential_env_present": {
             env_key_for_provider(provider_from_model(model)): bool(env.get(env_key_for_provider(provider_from_model(model))))
             for model in args.models
@@ -487,6 +713,10 @@ def run_matrix(args: argparse.Namespace, env: dict[str, str]) -> Path:
                 str(run_dir),
                 "--agent-include-logs",
                 "codewhale.txt",
+                "--agent-include-logs",
+                "codewhale-artifact-preflight.txt",
+                "--agent-include-logs",
+                "codewhale-harness-note.txt",
                 "--yes",
             ]
             if reasoning_effort:

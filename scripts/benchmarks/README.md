@@ -59,3 +59,33 @@ python scripts/benchmarks/run-codewhale-terminal-bench.py \
 
 See [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md) for full setup instructions,
 reproducibility checklists, and references.
+
+## Terminal-Bench Harness Diagnostics
+
+The local CodeWhale Terminal-Bench adapter runs an artifact preflight inside
+each task container before the agent starts:
+
+```bash
+codewhale --version
+ldd "$(command -v codewhale)"
+/lib/x86_64-linux-gnu/libc.so.6 || true
+```
+
+Rows with loader, glibc, OpenSSL, or related library failures are classified as
+`artifact_incompatible` instead of model failures. The adapter also injects a
+compact harness note listing detected verifier surfaces, task-specific
+readiness probes when known, background service helpers, and timeout classes.
+
+Summary rows include one primary `failure_class`:
+
+```text
+solved
+model_wrong_answer
+tool_policy_loop
+artifact_incompatible
+setup_timeout
+background_not_ready
+verifier_environment_failure
+context_exhaustion
+harness_exception
+```
