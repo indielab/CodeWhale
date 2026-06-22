@@ -1893,8 +1893,12 @@ async fn server_shutdown_signal() -> i32 {
 /// Object idiom in `crates/tui/src/tools/shell.rs`.
 #[cfg(windows)]
 fn attach_server_child_job(child: &tokio::process::Child) -> Option<ServerChildJob> {
-    use std::os::windows::io::AsRawHandle;
-    match ServerChildJob::attach(child.as_raw_handle()) {
+    let Some(child_handle) = child.raw_handle() else {
+        tracing::warn!("delegated server child exited before a job object could be attached");
+        return None;
+    };
+
+    match ServerChildJob::attach(child_handle) {
         Ok(job) => Some(job),
         Err(err) => {
             tracing::warn!("failed to place delegated server child in a job object: {err}");
