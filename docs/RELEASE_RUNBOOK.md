@@ -146,8 +146,8 @@ review and CI finish, merge it, then tag the commit that is reachable from
 `main` or let `auto-tag.yml` create that tag after the version bump reaches
 `main`. This is what lets GitHub process `Closes #N` lines automatically and
 show the release PR as merged. The tag release workflow runs
-`scripts/release/ensure-release-on-main.sh` and fails branch-only tags before
-assets are published.
+`scripts/release/ensure-release-on-main.sh` for tag pushes and manual dispatches,
+and fails branch-only release sources before assets are published.
 
 1. Write the CHANGELOG entry, then run
    `./scripts/release/prepare-release.sh X.Y.Z` — it bumps every
