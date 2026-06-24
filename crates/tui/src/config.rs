@@ -296,7 +296,8 @@ impl ApiProvider {
     /// own infrastructure, so they carry a local/private posture. Used by the
     /// fallback chain to avoid silently routing a local/private primary out to
     /// a cloud provider (#2574) and by the `/provider` dashboard's self-hosted
-    /// hint (#3083).
+    /// hint (#3083). Update this list whenever adding a provider whose runtime
+    /// is hosted on the user's own infrastructure.
     #[must_use]
     pub fn is_self_hosted(self) -> bool {
         matches!(self, Self::Sglang | Self::Vllm | Self::Ollama)

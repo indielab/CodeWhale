@@ -3178,3 +3178,38 @@ fn advance_fallback_local_primary_may_fall_back_to_local_sibling() {
     let reason = app.last_fallback_reason.as_deref().unwrap_or_default();
     assert!(reason.contains("Fell back to vllm"), "{reason}");
 }
+
+#[test]
+fn advance_fallback_cloud_primary_can_hop_cloud_to_local_to_cloud() {
+    let _lock = lock_test_env();
+    let _openai = EnvVarGuard::remove("OPENAI_API_KEY");
+    let _deepseek = EnvVarGuard::remove("DEEPSEEK_API_KEY");
+
+    // The local/private guard is origin-based. A cloud primary may route to a
+    // local fallback and then to another cloud fallback if the cloud candidate
+    // is otherwise ready; only local/private primaries are blocked from leaking
+    // out to cloud.
+    let mut app = app_with_fallback_chain(
+        ApiProvider::Openai,
+        &[
+            codewhale_config::ProviderKind::Ollama,
+            codewhale_config::ProviderKind::Deepseek,
+        ],
+        &[ApiProvider::Openai, ApiProvider::Deepseek],
+    );
+
+    let local = app.advance_fallback("cloud provider timed out");
+    assert_eq!(local, Some(ApiProvider::Ollama));
+    assert_eq!(app.api_provider, ApiProvider::Ollama);
+
+    let cloud = app.advance_fallback("local runtime unavailable");
+    assert_eq!(cloud, Some(ApiProvider::Deepseek));
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+
+    let reason = app.last_fallback_reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("Fell back to deepseek"), "{reason}");
+    assert!(
+        !reason.contains("local/private policy"),
+        "cloud-primary chains should not trigger local/private blocking: {reason}"
+    );
+}

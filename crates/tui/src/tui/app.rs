@@ -5673,7 +5673,9 @@ impl App {
     /// Local/private policy (#2574): when the chain's primary provider is a
     /// self-hosted / local runtime, cloud candidates are skipped with a clear
     /// note so a local/private route never silently falls back out to a hosted
-    /// provider. Self-hosted siblings remain eligible.
+    /// provider. Self-hosted siblings remain eligible. The policy is anchored
+    /// to the original primary; a cloud primary may still hop through a local
+    /// runtime and then back to another cloud fallback.
     pub fn advance_fallback(&mut self, reason: impl Into<String>) -> Option<ApiProvider> {
         let reason = reason.into();
         self.provider_chain.as_ref()?;

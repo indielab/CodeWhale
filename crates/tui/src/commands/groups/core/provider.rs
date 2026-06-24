@@ -179,6 +179,7 @@ fn expand_model_alias_for_provider(provider: ApiProvider, name: &str) -> String 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::test_support::lock_test_env;
     use crate::tui::app::TuiOptions;
     use std::path::PathBuf;
 
@@ -604,6 +605,7 @@ mod tests {
     /// `switch_provider`), so a bare `ProviderChain::reset()` is not needed here.
     #[test]
     fn provider_fallback_reset_targets_primary_even_when_on_fallback() {
+        let _lock = lock_test_env();
         let mut app = create_test_app();
         app.api_provider = ApiProvider::Deepseek;
         app.provider_chain = Some(codewhale_config::ProviderChain::new(
