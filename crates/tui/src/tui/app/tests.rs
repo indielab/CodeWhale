@@ -1944,6 +1944,8 @@ fn test_update_model_compaction_budget() {
     // depend on the developer's local `auto_compact_threshold_percent`
     // setting (App::new loads real settings) or on auto-model resolution.
     app.auto_model = false;
+    app.active_route_limits = None;
+    app.active_context_window_override = None;
     app.auto_compact_threshold_percent = 80.0;
 
     // A large-context model earns a proportionally larger compaction
