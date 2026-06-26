@@ -6,6 +6,7 @@
 //! redacted handles, aggregate counts, and broad failure classes.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +26,24 @@ pub(crate) enum SessionFailureClass {
     Model,
     Unknown,
     UnclosedTurn,
+}
+
+impl fmt::Display for SessionFailureClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::CommandExit => "command_exit",
+            Self::Network => "network",
+            Self::SandboxApproval => "sandbox_approval",
+            Self::MissingDependency => "missing_dependency",
+            Self::Timeout => "timeout",
+            Self::BackgroundJob => "background_job",
+            Self::ToolSchema => "tool_schema",
+            Self::Model => "model",
+            Self::Unknown => "unknown",
+            Self::UnclosedTurn => "unclosed_turn",
+        };
+        f.write_str(label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +102,7 @@ pub(crate) fn analyze_session_failure_jsonl(jsonl: &str) -> SessionFailureSummar
         };
 
         let event = event_name(&value);
-        let turn_id = string_field_any(&value, &["turn_id", "turnId", "run_id", "id"]);
+        let turn_id = string_field_any(&value, &["turn_id", "turnId", "run_id"]);
         let source = source_handle(line_no, &value, event.clone(), turn_id.as_deref());
         let failure_signal = has_failure_signal(&value);
 
@@ -144,7 +163,7 @@ pub(crate) fn format_redacted_failure_summary(summary: &SessionFailureSummary) -
             .and_then(|sources| sources.first())
             .map(format_source)
             .unwrap_or_else(|| "no source".to_string());
-        lines.push(format!("- {class:?}: {count} (sample: {sample})"));
+        lines.push(format!("- {class}: {count} (sample: {sample})"));
     }
     lines.join("\n")
 }
@@ -155,7 +174,7 @@ fn source_handle(
     event: Option<String>,
     turn_id: Option<&str>,
 ) -> SessionFailureSource {
-    let tool_name = string_field_any(value, &["tool_name", "toolName", "tool", "name"])
+    let tool_name = string_field_any(value, &["tool_name", "toolName", "tool"])
         .filter(|name| event.as_deref().is_none_or(|event| event != name));
     SessionFailureSource {
         line,
@@ -188,7 +207,7 @@ fn has_failure_signal(value: &Value) -> bool {
         || bool_field_any(value, &["success"]).is_some_and(|success| !success)
         || bool_field_any(value, &["is_error", "isError"]).unwrap_or(false)
         || failure_status(value).is_some()
-        || string_field_any(value, &["error", "stderr"]).is_some()
+        || string_field_any(value, &["error", "stderr"]).is_some_and(|text| !text.is_empty())
 }
 
 fn classify_failure_signal(value: &Value) -> SessionFailureClass {
@@ -255,9 +274,8 @@ fn classify_session_failure(value: &Value, message: &str) -> SessionFailureClass
     match classify_error_message(message) {
         ErrorCategory::Network | ErrorCategory::RateLimit => SessionFailureClass::Network,
         ErrorCategory::Timeout => SessionFailureClass::Timeout,
-        ErrorCategory::Authorization | ErrorCategory::Authentication => {
-            SessionFailureClass::SandboxApproval
-        }
+        ErrorCategory::Authorization => SessionFailureClass::SandboxApproval,
+        ErrorCategory::Authentication => SessionFailureClass::Model,
         ErrorCategory::State => SessionFailureClass::MissingDependency,
         ErrorCategory::InvalidInput | ErrorCategory::Parse => SessionFailureClass::ToolSchema,
         ErrorCategory::Tool => SessionFailureClass::CommandExit,
@@ -346,6 +364,13 @@ fn failure_status(value: &Value) -> Option<String> {
 }
 
 fn string_field_any(value: &Value, keys: &[&str]) -> Option<String> {
+    string_field_any_at(value, keys, 0)
+}
+
+fn string_field_any_at(value: &Value, keys: &[&str], depth: usize) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
     match value {
         Value::Object(map) => {
             for key in keys {
@@ -357,18 +382,27 @@ fn string_field_any(value: &Value, keys: &[&str]) -> Option<String> {
                 }
             }
             for child in map.values() {
-                if let Some(found) = string_field_any(child, keys) {
+                if let Some(found) = string_field_any_at(child, keys, depth + 1) {
                     return Some(found);
                 }
             }
             None
         }
-        Value::Array(items) => items.iter().find_map(|item| string_field_any(item, keys)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| string_field_any_at(item, keys, depth + 1)),
         _ => None,
     }
 }
 
 fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<i64> {
+    numeric_field_any_at(value, keys, 0)
+}
+
+fn numeric_field_any_at(value: &Value, keys: &[&str], depth: usize) -> Option<i64> {
+    if depth > 4 {
+        return None;
+    }
     match value {
         Value::Object(map) => {
             for key in keys {
@@ -380,18 +414,27 @@ fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<i64> {
                 }
             }
             for child in map.values() {
-                if let Some(found) = numeric_field_any(child, keys) {
+                if let Some(found) = numeric_field_any_at(child, keys, depth + 1) {
                     return Some(found);
                 }
             }
             None
         }
-        Value::Array(items) => items.iter().find_map(|item| numeric_field_any(item, keys)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| numeric_field_any_at(item, keys, depth + 1)),
         _ => None,
     }
 }
 
 fn bool_field_any(value: &Value, keys: &[&str]) -> Option<bool> {
+    bool_field_any_at(value, keys, 0)
+}
+
+fn bool_field_any_at(value: &Value, keys: &[&str], depth: usize) -> Option<bool> {
+    if depth > 4 {
+        return None;
+    }
     match value {
         Value::Object(map) => {
             for key in keys {
@@ -403,13 +446,15 @@ fn bool_field_any(value: &Value, keys: &[&str]) -> Option<bool> {
                 }
             }
             for child in map.values() {
-                if let Some(found) = bool_field_any(child, keys) {
+                if let Some(found) = bool_field_any_at(child, keys, depth + 1) {
                     return Some(found);
                 }
             }
             None
         }
-        Value::Array(items) => items.iter().find_map(|item| bool_field_any(item, keys)),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| bool_field_any_at(item, keys, depth + 1)),
         _ => None,
     }
 }
@@ -470,7 +515,7 @@ not json at all
         let summary = analyze_session_failure_jsonl(jsonl);
         let rendered = format_redacted_failure_summary(&summary);
 
-        assert!(rendered.contains("MissingDependency"));
+        assert!(rendered.contains("missing_dependency"));
         assert!(rendered.contains("line 3"));
         assert!(rendered.contains("tool=read_file"));
         assert!(rendered.contains("ts=2026-06-25T12:34:56Z"));
@@ -496,5 +541,69 @@ not json at all
             summary.counts.is_empty(),
             "summary should be empty: {summary:?}"
         );
+    }
+
+    #[test]
+    fn empty_error_field_is_not_a_failure_signal() {
+        let jsonl = r#"
+{"event":"tool_call_complete","success":true,"error":"","stderr":""}
+"#;
+
+        let summary = analyze_session_failure_jsonl(jsonl);
+
+        assert!(
+            summary.counts.is_empty(),
+            "empty error/stderr sentinels should not signal failure: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn nested_generic_fields_do_not_shadow_source_handles() {
+        let jsonl = r#"
+{"event":"tool_call_complete","turn_id":"turn-real","tool_name":"exec_shell","success":false,"payload":{"id":"nested-id","name":"nested-name","error":"nested error"}}
+"#;
+
+        let summary = analyze_session_failure_jsonl(jsonl);
+        let source = summary
+            .sources
+            .values()
+            .flat_map(|sources| sources.iter())
+            .next()
+            .expect("failure source");
+
+        assert_eq!(source.tool_name.as_deref(), Some("exec_shell"));
+        assert!(
+            source
+                .turn_ref
+                .as_deref()
+                .is_some_and(|turn| turn.starts_with("<redacted:")),
+            "top-level turn id should be redacted and used: {source:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_error_field_is_ignored() {
+        let jsonl = r#"
+{"event":"tool_call_complete","payload":{"a":{"b":{"c":{"d":{"e":{"error":"too deep"}}}}}}}
+"#;
+
+        let summary = analyze_session_failure_jsonl(jsonl);
+
+        assert!(
+            summary.counts.is_empty(),
+            "deeply nested error fields should not signal failure: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn authentication_failures_are_model_failures_not_sandbox_approval() {
+        let jsonl = r#"
+{"event":"model_response","success":false,"error":"Authentication failed: invalid API key"}
+"#;
+
+        let summary = analyze_session_failure_jsonl(jsonl);
+
+        assert_eq!(summary.count(SessionFailureClass::Model), 1);
+        assert_eq!(summary.count(SessionFailureClass::SandboxApproval), 0);
     }
 }
