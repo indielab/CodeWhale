@@ -66,18 +66,21 @@ Each repo can carry two distinct, complementary files:
 ### Overriding the global base prompt (#3638)
 
 The global Constitution (the base system prompt, normally compiled in from
-`prompts/constitution.md`) can be replaced per-user without rebuilding, by
-dropping a file at:
+`prompts/constitution.md`) can be replaced per-user without rebuilding. Because
+this is a prompt trust boundary, it takes **two deliberate steps** — a file
+alone is not enough:
 
-```
-~/.codewhale/prompts/constitution.md
-```
+1. Drop the replacement at `~/.codewhale/prompts/constitution.md` (under
+   `$CODEWHALE_HOME` when set).
+2. Set the explicit opt-in flag `CODEWHALE_ALLOW_BASE_PROMPT_OVERRIDE=1`
+   (`true`/`on`/`yes` also accepted).
 
-(under `$CODEWHALE_HOME` when set). This is intended for repurposing the TUI
-beyond software engineering — e.g. long-form writing or document review — where
-the engineering-oriented base prompt is a poor fit. It is loaded once at
-startup; a **missing or empty file is a no-op**, so existing installs keep the
-bundled prompt.
+If the file exists but the flag is unset, the override is **ignored** (with a
+log line pointing to the flag) and the bundled Constitution stays in place.
+This is intended for repurposing the TUI beyond software engineering — e.g.
+long-form writing or document review — where the engineering-oriented base
+prompt is a poor fit. It is loaded once at startup; a **missing or empty file
+is a no-op**, so existing installs keep the bundled prompt.
 
 Scope is deliberately narrow: only the byte-stable **base prompt segment** is
 overridable. Mode deltas, the approval policy, the tool taxonomy, Context
