@@ -87,10 +87,15 @@ impl Skill {
     /// Pick the best description for a session `locale_tag`, falling back to the
     /// default `description` when no localized variant matches.
     ///
-    /// Matching is conservative on purpose: an exact (lowercased) tag match
-    /// first, then the primary language subtag (e.g. `zh-cn` → `zh`). We do not
-    /// fold e.g. `zh-hant` into `zh`, since Traditional and Simplified are
-    /// authored separately — an author keys each variant by the tag they mean.
+    /// Order: exact (lowercased) tag match, then the primary language subtag
+    /// (so `en-us` → `en`, `pt-br` → `pt`, `zh-cn` → `zh`), then default.
+    ///
+    /// Chinese is the one place where the primary-subtag fallback would be
+    /// *wrong*: Traditional and Simplified are written differently, so a
+    /// Traditional tag (`zh-hant`, or the Traditional regions `zh-tw` / `zh-hk`
+    /// / `zh-mo`) must NOT borrow a Simplified `description_zh`. Those match only
+    /// an exact `description_zh-hant`-style key, else the default. Simplified
+    /// tags (`zh`, `zh-hans`, `zh-cn`, …) still fold to `description_zh`.
     #[must_use]
     pub fn description_for_locale(&self, locale_tag: &str) -> &str {
         if self.localized_descriptions.is_empty() {
@@ -101,8 +106,17 @@ impl Skill {
             return desc;
         }
         if let Some((primary, _)) = normalized.split_once('-') {
-            if let Some(desc) = self.localized_descriptions.get(primary) {
-                return desc;
+            // Don't let a Traditional-Chinese session fall back to a Simplified
+            // (`zh`) description — different written form, not just a region.
+            let traditional_chinese = primary == "zh"
+                && (normalized.contains("hant")
+                    || normalized.ends_with("-tw")
+                    || normalized.ends_with("-hk")
+                    || normalized.ends_with("-mo"));
+            if !traditional_chinese {
+                if let Some(desc) = self.localized_descriptions.get(primary) {
+                    return desc;
+                }
             }
         }
         &self.description
@@ -1110,10 +1124,39 @@ body";
 
         assert_eq!(skill.description_for_locale("zh"), "中文描述"); // exact
         assert_eq!(skill.description_for_locale("ZH"), "中文描述"); // case-insensitive
-        assert_eq!(skill.description_for_locale("zh-CN"), "中文描述"); // primary subtag
+        assert_eq!(skill.description_for_locale("zh-CN"), "中文描述"); // Simplified region → zh
+        assert_eq!(skill.description_for_locale("zh-Hans"), "中文描述"); // Simplified script → zh
         assert_eq!(skill.description_for_locale("ja"), "日本語の説明");
         assert_eq!(skill.description_for_locale("fr"), "English description"); // fallback
         assert_eq!(skill.description_for_locale("en"), "English description");
+
+        // Traditional Chinese must NOT borrow the Simplified `zh` description:
+        // with no exact zh-hant key authored, it falls back to the default.
+        assert_eq!(
+            skill.description_for_locale("zh-Hant"),
+            "English description"
+        );
+        assert_eq!(skill.description_for_locale("zh-TW"), "English description");
+        assert_eq!(skill.description_for_locale("zh-HK"), "English description");
+    }
+
+    #[test]
+    fn description_for_locale_uses_exact_traditional_key_when_authored() {
+        let mut localized = std::collections::HashMap::new();
+        localized.insert("zh".to_string(), "简体描述".to_string());
+        localized.insert("zh-hant".to_string(), "繁體描述".to_string());
+        let skill = super::Skill {
+            name: "demo".to_string(),
+            description: "English".to_string(),
+            localized_descriptions: localized,
+            body: String::new(),
+            path: std::path::PathBuf::new(),
+        };
+        // Exact Traditional key wins for a Traditional session.
+        assert_eq!(skill.description_for_locale("zh-Hant"), "繁體描述");
+        // Simplified session still gets the Simplified description.
+        assert_eq!(skill.description_for_locale("zh-Hans"), "简体描述");
+        assert_eq!(skill.description_for_locale("zh"), "简体描述");
     }
 
     #[test]
