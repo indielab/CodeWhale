@@ -9,6 +9,7 @@ pub mod provider;
 mod provider_defaults;
 mod provider_kind;
 pub mod route;
+pub mod setup_state;
 pub use harness::{
     HarnessCompactionStrategy, HarnessPosture, HarnessPostureKind, HarnessProfile,
     HarnessSafetyPosture, HarnessToolSurface, built_in_harness_profiles,
@@ -16,6 +17,10 @@ pub use harness::{
 pub use model_reference::{Modality, ModelReferenceCard, ModelReferenceDatabase};
 pub(crate) use provider_defaults::*;
 pub use provider_kind::ProviderKind;
+pub use setup_state::{
+    ConstitutionChoice, ConstitutionSource, ConstitutionValidity, InheritedConfigFacts,
+    RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
