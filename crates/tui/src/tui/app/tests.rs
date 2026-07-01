@@ -1476,12 +1476,13 @@ fn app_mode_helpers_centralize_parse_labels_and_cycle_order() {
     assert_eq!(AppMode::parse("fast"), None);
 
     assert_eq!(AppMode::Agent.as_setting(), "agent");
-    assert_eq!(AppMode::Auto.as_setting(), "auto");
+    assert_eq!(AppMode::Auto.as_setting(), "agent");
     assert_eq!(AppMode::Plan.display_name(), "Plan");
-    assert_eq!(AppMode::Auto.label(), "AUTO");
+    assert_eq!(AppMode::Auto.display_name(), "Agent");
+    assert_eq!(AppMode::Auto.label(), "AGENT");
     assert_eq!(AppMode::Yolo.label(), "YOLO");
     assert_eq!(AppMode::Agent.number(), '1');
-    assert_eq!(AppMode::Auto.number(), '3');
+    assert_eq!(AppMode::Auto.number(), '1');
     assert_eq!(AppMode::Yolo.number(), '4');
     assert_eq!(
         AppMode::CHOICES,
@@ -1745,12 +1746,12 @@ fn base_policy_for_mode_projects_the_mode_permission_table() {
     assert!(agent.trust_mode);
     assert_eq!(agent.approval_mode, ApprovalMode::Never);
 
-    // Auto: shell-enabled smart review, no trust authority.
+    // Auto: compatibility alias for the durable Agent baseline.
     let auto = base_policy_for_mode(AppMode::Auto, &prefs);
     assert_eq!(auto.mode, AppMode::Auto);
     assert!(auto.allow_shell);
-    assert!(!auto.trust_mode);
-    assert_eq!(auto.approval_mode, ApprovalMode::Auto);
+    assert!(auto.trust_mode);
+    assert_eq!(auto.approval_mode, ApprovalMode::Never);
 
     // YOLO: full authority is represented by Bypass, not a separate
     // auto-approve field (#3736).
