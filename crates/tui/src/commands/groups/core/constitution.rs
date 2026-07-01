@@ -9,7 +9,7 @@ use codewhale_config::{
 };
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
-use crate::localization::MessageId;
+use crate::localization::{Locale, MessageId};
 use crate::tui::app::{App, AppAction};
 use crate::tui::pager::PagerView;
 
@@ -67,7 +67,7 @@ impl RegisterCommand for ConstitutionCmd {
             Some("bundled" | "default" | "use-bundled" | "use-default") => {
                 CommandResult::action(AppAction::UseBundledConstitution)
             }
-            Some("help") => CommandResult::message(help_text()),
+            Some("help") => CommandResult::message(help_text(app.ui_locale)),
             Some(other) => CommandResult::error(format!(
                 "Unknown /constitution target '{other}'. Try `/constitution` for the manager."
             )),
@@ -76,35 +76,37 @@ impl RegisterCommand for ConstitutionCmd {
 }
 
 fn open_status(app: &mut App) {
-    let text = format_status(app);
-    open_pager(app, "Constitution", &text);
+    let locale = app.ui_locale;
+    let text = format_status(app, locale);
+    open_pager(app, manager_title(locale), &text);
 }
 
 fn open_review(app: &mut App) {
-    let mut text = format_status(app);
-    let _ = write!(text, "\n\n{}", preview_text());
-    open_pager(app, "Constitution Review", &text);
+    let locale = app.ui_locale;
+    let mut text = format_status(app, locale);
+    let _ = write!(text, "\n\n{}", preview_text(locale));
+    open_pager(app, review_title(locale), &text);
 }
 
 fn open_preview(app: &mut App) {
-    let text = preview_text();
-    open_pager(app, "Rendered User Constitution", &text);
+    let locale = app.ui_locale;
+    let text = preview_text(locale);
+    open_pager(app, rendered_title(locale), &text);
 }
 
 fn open_repo_law(app: &mut App) {
+    let locale = app.ui_locale;
     let context = crate::project_context::load_project_context_with_parents(&app.workspace);
     let text = match context.constitution_block {
         Some(block) => block,
-        None => {
-            "No repo-local constitution found at .codewhale/constitution.json for this workspace."
-                .to_string()
-        }
+        None => no_repo_law_text(locale).to_string(),
     };
-    open_pager(app, "Repo-Local Constitution", &text);
+    open_pager(app, repo_title(locale), &text);
 }
 
 fn open_explanation(app: &mut App) {
-    open_pager(app, "AGENTS.md vs Constitution", AGENTS_EXPLANATION);
+    let locale = app.ui_locale;
+    open_pager(app, explanation_title(locale), agents_explanation(locale));
 }
 
 fn open_pager(app: &mut App, title: &str, text: &str) {
@@ -117,49 +119,59 @@ fn open_pager(app: &mut App, title: &str, text: &str) {
         .push(PagerView::from_text(title, text, width.saturating_sub(2)));
 }
 
-fn format_status(app: &App) -> String {
+fn format_status(app: &App, locale: Locale) -> String {
     let state = load_setup_state();
     let load = load_user_constitution();
     let context = crate::project_context::load_project_context_with_parents(&app.workspace);
     let mut out = String::new();
 
-    out.push_str("Constitution Manager\n\n");
-    out.push_str("Active stack\n");
-    out.push_str("- Bundled Constitution: active base law (always on)\n");
+    let copy = ConstitutionManagerCopy::for_locale(locale);
+
+    let _ = writeln!(out, "{}", copy.manager_header);
+    out.push('\n');
+    let _ = writeln!(out, "{}", copy.active_stack_header);
+    let _ = writeln!(out, "- {}", copy.bundled_active);
     let _ = writeln!(
         out,
-        "- User-global constitution: {}",
-        user_constitution_stack_status(state.as_ref(), &load)
+        "- {}: {}",
+        copy.user_global_label,
+        user_constitution_stack_status(state.as_ref(), &load, locale)
     );
     if let Some(path) = context.constitution_source_path.as_ref() {
         let _ = writeln!(
             out,
-            "- Repo-local constitution: present ({})",
+            "- {}: {} ({})",
+            copy.repo_local_label,
+            copy.present,
             path.display()
         );
     } else {
-        out.push_str("- Repo-local constitution: not present\n");
+        let _ = writeln!(out, "- {}: {}", copy.repo_local_label, copy.not_present);
     }
     if let Some(path) = context.source_path.as_ref() {
         let _ = writeln!(
             out,
-            "- AGENTS/project instructions: present ({})",
+            "- {}: {} ({})",
+            copy.agents_label,
+            copy.present,
             path.display()
         );
     } else if context.instructions.is_some() {
-        out.push_str("- AGENTS/project instructions: generated fallback\n");
+        let _ = writeln!(out, "- {}: {}", copy.agents_label, copy.generated_fallback);
     } else {
-        out.push_str("- AGENTS/project instructions: not present\n");
+        let _ = writeln!(out, "- {}: {}", copy.agents_label, copy.not_present);
     }
     let whale_warnings = ignored_whale_warnings(&context.warnings);
     if whale_warnings.is_empty() {
-        out.push_str("- Legacy WHALE.md: not present\n");
+        let _ = writeln!(out, "- {}: {}", copy.legacy_whale_label, copy.not_present);
     } else {
         let _ = writeln!(
             out,
-            "- Legacy WHALE.md: ignored; migration needed ({} location{})",
+            "- {}: {} ({} {})",
+            copy.legacy_whale_label,
+            copy.whale_ignored,
             whale_warnings.len(),
-            if whale_warnings.len() == 1 { "" } else { "s" }
+            copy.location_count_unit(whale_warnings.len())
         );
         for warning in whale_warnings {
             let _ = writeln!(out, "  - {warning}");
@@ -168,91 +180,100 @@ fn format_status(app: &App) -> String {
     let handoff_path = app.workspace.join(crate::prompts::HANDOFF_RELATIVE_PATH);
     let _ = writeln!(
         out,
-        "- Memory/handoff: memory {}, handoff {}",
+        "- {}: {} {}, {} {}",
+        copy.memory_handoff_label,
+        copy.memory_label,
         if app.use_memory {
-            "enabled"
+            copy.enabled
         } else {
-            "disabled"
+            copy.disabled
         },
+        copy.handoff_label,
         if handoff_path.exists() {
-            "present"
+            copy.present
         } else {
-            "not present"
+            copy.not_present
         }
     );
 
-    out.push_str("\nUser-global constitution\n");
+    out.push('\n');
+    let _ = writeln!(out, "{}", copy.user_global_header);
     let _ = writeln!(
         out,
-        "- Choice: {}",
-        state
-            .as_ref()
-            .map_or("not recorded", |s| choice_label(s.constitution_choice))
+        "- {}: {}",
+        copy.choice_label,
+        state.as_ref().map_or(copy.not_recorded, |s| choice_label(
+            s.constitution_choice,
+            locale
+        ))
     );
     let _ = writeln!(
         out,
-        "- Source: {}",
-        state
-            .as_ref()
-            .map_or("not recorded", |s| source_label(s.constitution_source))
-    );
-    let _ = writeln!(out, "- File: {}", user_constitution_file_label(&load));
-    let _ = writeln!(
-        out,
-        "- Validity: {}",
-        validity_label(load.validity_for_display(state.as_ref()))
+        "- {}: {}",
+        copy.source_label,
+        state.as_ref().map_or(copy.not_recorded, |s| source_label(
+            s.constitution_source,
+            locale
+        ))
     );
     let _ = writeln!(
         out,
-        "- Language: {}",
-        constitution_language(state.as_ref(), &load)
+        "- {}: {}",
+        copy.file_label,
+        user_constitution_file_label(&load, locale)
     );
     let _ = writeln!(
         out,
-        "- Last accepted preview: {}",
-        preview_record_label(state.as_ref())
+        "- {}: {}",
+        copy.validity_label,
+        validity_label(load.validity_for_display(state.as_ref()), locale)
     );
     let _ = writeln!(
         out,
-        "- Runtime posture: {}",
-        state
-            .as_ref()
-            .map_or("not reviewed", |s| posture_label(s.runtime_posture_source))
+        "- {}: {}",
+        copy.language_label,
+        constitution_language(state.as_ref(), &load, locale)
     );
     let _ = writeln!(
         out,
-        "- Checkpoint: {}",
-        state.as_ref().map_or("not completed".to_string(), |s| {
+        "- {}: {}",
+        copy.last_preview_label,
+        preview_record_label(state.as_ref(), locale)
+    );
+    let _ = writeln!(
+        out,
+        "- {}: {}",
+        copy.runtime_posture_label,
+        state.as_ref().map_or(copy.not_reviewed, |s| posture_label(
+            s.runtime_posture_source,
+            locale
+        ))
+    );
+    let _ = writeln!(
+        out,
+        "- {}: {}",
+        copy.checkpoint_label,
+        state.as_ref().map_or(copy.not_completed.to_string(), |s| {
             s.constitution_checkpoint_completed_for
                 .as_ref()
-                .map_or_else(
-                    || "not completed".to_string(),
-                    |v| format!("completed for {v}"),
-                )
+                .map_or_else(|| copy.not_completed.to_string(), |v| copy.completed_for(v))
         })
     );
 
-    out.push_str("\nPreview\n");
-    out.push_str(
-        "- /constitution preview opens the exact rendered user-global block when present.\n",
-    );
-    out.push_str(
-        "- /constitution repo shows .codewhale/constitution.json local law when present.\n",
-    );
+    out.push('\n');
+    let _ = writeln!(out, "{}", copy.preview_header);
+    let _ = writeln!(out, "- {}", copy.preview_action);
+    let _ = writeln!(out, "- {}", copy.repo_action);
 
-    out.push_str("\nMaintenance\n");
-    out.push_str("- Edit guided constitution: /constitution edit\n");
-    out.push_str("- Preview rendered constitution: /constitution preview\n");
-    out.push_str("- Use bundled/default: /constitution bundled\n");
-    out.push_str("- Review existing: /constitution review\n");
-    out.push_str("- Repair invalid/empty/unreadable: /constitution repair\n");
-    out.push_str("- Show repo-local law: /constitution repo\n");
-    out.push_str("- Explain AGENTS.md vs constitution: /constitution explain\n");
-    out.push_str("- Open runtime posture: /constitution posture\n");
+    out.push('\n');
+    let _ = writeln!(out, "{}", copy.maintenance_header);
+    for action in copy.maintenance_actions {
+        let _ = writeln!(out, "- {action}");
+    }
     out
 }
 
-fn preview_text() -> String {
+fn preview_text(locale: Locale) -> String {
     let state = load_setup_state();
     let load = load_user_constitution();
     match load {
@@ -260,44 +281,25 @@ fn preview_text() -> String {
             let active = user_constitution_is_active(state.as_ref());
             let mut text = String::new();
             if !active {
-                text.push_str(
-                    "Inactive preview: bundled/default or expert override is selected.\n\n",
-                );
+                text.push_str(inactive_preview_text(locale));
+                text.push_str("\n\n");
             }
             text.push_str(
                 &constitution
                     .render_block(Some(&path))
-                    .unwrap_or_else(|| "The structured constitution is empty.".to_string()),
+                    .unwrap_or_else(|| structured_empty_text(locale).to_string()),
             );
             text
         }
-        UserConstitutionStatus::Missing { path } => {
-            format!(
-                "No structured user-global constitution found at {}.\n\nBundled law applies. Use /constitution edit to create guided standing preferences, or /constitution bundled to record bundled/default explicitly.",
-                path.display()
-            )
-        }
-        UserConstitutionStatus::Empty { path } => {
-            format!(
-                "The structured user-global constitution at {} is empty. Use /constitution repair to return to the guided constitution step.",
-                path.display()
-            )
-        }
+        UserConstitutionStatus::Missing { path } => missing_preview_text(locale, &path),
+        UserConstitutionStatus::Empty { path } => empty_preview_text(locale, &path),
         UserConstitutionStatus::Invalid { path, error } => {
-            format!(
-                "The structured user-global constitution at {} is invalid and is not injected.\n\n{error}\n\nUse /constitution repair to return to the guided constitution step.",
-                path.display()
-            )
+            invalid_preview_text(locale, &path, &error)
         }
         UserConstitutionStatus::Unreadable { path, error } => {
-            format!(
-                "The structured user-global constitution at {} could not be read and is not injected.\n\n{error}\n\nUse /constitution repair to return to the guided constitution step.",
-                path.display()
-            )
+            unreadable_preview_text(locale, &path, &error)
         }
-        UserConstitutionStatus::PathError { error } => {
-            format!("Could not resolve CODEWHALE_HOME for the user-global constitution:\n\n{error}")
-        }
+        UserConstitutionStatus::PathError { error } => path_error_preview_text(locale, &error),
     }
 }
 
@@ -377,22 +379,40 @@ fn load_user_constitution() -> UserConstitutionStatus {
 fn user_constitution_stack_status(
     state: Option<&SetupState>,
     load: &UserConstitutionStatus,
+    locale: Locale,
 ) -> String {
-    match load {
-        UserConstitutionStatus::Loaded { .. } if user_constitution_is_active(state) => {
-            "active structured user-global law".to_string()
-        }
-        UserConstitutionStatus::Loaded { .. } => {
-            "valid but inactive (bundled/default or expert override selected)".to_string()
-        }
-        UserConstitutionStatus::Missing { .. } => {
-            "not configured; bundled/default applies".to_string()
-        }
-        UserConstitutionStatus::Empty { .. } => "empty; repair recommended".to_string(),
-        UserConstitutionStatus::Invalid { .. } => "invalid; repair recommended".to_string(),
-        UserConstitutionStatus::Unreadable { .. } => "unreadable; repair recommended".to_string(),
-        UserConstitutionStatus::PathError { .. } => "unavailable; CODEWHALE_HOME error".to_string(),
-    }
+    let text = match load {
+        UserConstitutionStatus::Loaded { .. } if user_constitution_is_active(state) => match locale
+        {
+            Locale::ZhHans => "结构化用户全局准则已生效",
+            _ => "active structured user-global law",
+        },
+        UserConstitutionStatus::Loaded { .. } => match locale {
+            Locale::ZhHans => "有效但未生效（已选择内置/默认或专家覆盖）",
+            _ => "valid but inactive (bundled/default or expert override selected)",
+        },
+        UserConstitutionStatus::Missing { .. } => match locale {
+            Locale::ZhHans => "未配置；使用内置/默认准则",
+            _ => "not configured; bundled/default applies",
+        },
+        UserConstitutionStatus::Empty { .. } => match locale {
+            Locale::ZhHans => "为空；建议修复",
+            _ => "empty; repair recommended",
+        },
+        UserConstitutionStatus::Invalid { .. } => match locale {
+            Locale::ZhHans => "无效；建议修复",
+            _ => "invalid; repair recommended",
+        },
+        UserConstitutionStatus::Unreadable { .. } => match locale {
+            Locale::ZhHans => "无法读取；建议修复",
+            _ => "unreadable; repair recommended",
+        },
+        UserConstitutionStatus::PathError { .. } => match locale {
+            Locale::ZhHans => "不可用；CODEWHALE_HOME 错误",
+            _ => "unavailable; CODEWHALE_HOME error",
+        },
+    };
+    text.to_string()
 }
 
 fn user_constitution_is_active(state: Option<&SetupState>) -> bool {
@@ -406,18 +426,26 @@ fn user_constitution_is_active(state: Option<&SetupState>) -> bool {
     )
 }
 
-fn user_constitution_file_label(load: &UserConstitutionStatus) -> String {
+fn user_constitution_file_label(load: &UserConstitutionStatus, locale: Locale) -> String {
     match load {
         UserConstitutionStatus::Missing { path }
         | UserConstitutionStatus::Empty { path }
         | UserConstitutionStatus::Invalid { path, .. }
         | UserConstitutionStatus::Unreadable { path, .. }
         | UserConstitutionStatus::Loaded { path, .. } => path.display().to_string(),
-        UserConstitutionStatus::PathError { .. } => "unresolved".to_string(),
+        UserConstitutionStatus::PathError { .. } => match locale {
+            Locale::ZhHans => "无法解析",
+            _ => "unresolved",
+        }
+        .to_string(),
     }
 }
 
-fn constitution_language(state: Option<&SetupState>, load: &UserConstitutionStatus) -> String {
+fn constitution_language(
+    state: Option<&SetupState>,
+    load: &UserConstitutionStatus,
+    locale: Locale,
+) -> String {
     if let UserConstitutionStatus::Loaded { constitution, .. } = load
         && let Some(language) = constitution.language.as_deref()
     {
@@ -425,53 +453,80 @@ fn constitution_language(state: Option<&SetupState>, load: &UserConstitutionStat
     }
     state
         .and_then(|s| s.constitution_language.as_deref())
-        .unwrap_or("not recorded")
+        .unwrap_or(match locale {
+            Locale::ZhHans => "未记录",
+            _ => "not recorded",
+        })
         .to_string()
 }
 
-fn preview_record_label(state: Option<&SetupState>) -> String {
+fn preview_record_label(state: Option<&SetupState>, locale: Locale) -> String {
     let Some(state) = state else {
-        return "not recorded".to_string();
+        return match locale {
+            Locale::ZhHans => "未记录",
+            _ => "not recorded",
+        }
+        .to_string();
     };
     match state.constitution_preview_hash.as_deref() {
         Some(hash) => format!("v{} ({hash})", state.constitution_preview_version),
-        None => "not recorded".to_string(),
+        None => match locale {
+            Locale::ZhHans => "未记录",
+            _ => "not recorded",
+        }
+        .to_string(),
     }
 }
 
-fn choice_label(choice: ConstitutionChoice) -> &'static str {
-    match choice {
-        ConstitutionChoice::Unset => "not set",
-        ConstitutionChoice::Bundled => "bundled/default",
-        ConstitutionChoice::GuidedCustom => "guided custom",
-        ConstitutionChoice::ExpertOverride => "expert override",
-        ConstitutionChoice::Deferred => "deferred; bundled applies",
+fn choice_label(choice: ConstitutionChoice, locale: Locale) -> &'static str {
+    match (locale, choice) {
+        (Locale::ZhHans, ConstitutionChoice::Unset) => "未设置",
+        (Locale::ZhHans, ConstitutionChoice::Bundled) => "内置/默认",
+        (Locale::ZhHans, ConstitutionChoice::GuidedCustom) => "引导式自定义",
+        (Locale::ZhHans, ConstitutionChoice::ExpertOverride) => "专家覆盖",
+        (Locale::ZhHans, ConstitutionChoice::Deferred) => "已暂缓；使用内置",
+        (_, ConstitutionChoice::Unset) => "not set",
+        (_, ConstitutionChoice::Bundled) => "bundled/default",
+        (_, ConstitutionChoice::GuidedCustom) => "guided custom",
+        (_, ConstitutionChoice::ExpertOverride) => "expert override",
+        (_, ConstitutionChoice::Deferred) => "deferred; bundled applies",
     }
 }
 
-fn source_label(source: ConstitutionSource) -> &'static str {
-    match source {
-        ConstitutionSource::Bundled => "bundled",
-        ConstitutionSource::UserGlobal => "user-global constitution.json",
-        ConstitutionSource::ExpertOverride => "expert prompt override",
+fn source_label(source: ConstitutionSource, locale: Locale) -> &'static str {
+    match (locale, source) {
+        (Locale::ZhHans, ConstitutionSource::Bundled) => "内置",
+        (Locale::ZhHans, ConstitutionSource::UserGlobal) => "用户全局 constitution.json",
+        (Locale::ZhHans, ConstitutionSource::ExpertOverride) => "专家提示词覆盖",
+        (_, ConstitutionSource::Bundled) => "bundled",
+        (_, ConstitutionSource::UserGlobal) => "user-global constitution.json",
+        (_, ConstitutionSource::ExpertOverride) => "expert prompt override",
     }
 }
 
-fn validity_label(validity: ConstitutionValidity) -> &'static str {
-    match validity {
-        ConstitutionValidity::Unknown => "unknown or not custom",
-        ConstitutionValidity::Valid => "valid",
-        ConstitutionValidity::Invalid => "invalid",
-        ConstitutionValidity::Empty => "empty",
-        ConstitutionValidity::Unreadable => "unreadable",
+fn validity_label(validity: ConstitutionValidity, locale: Locale) -> &'static str {
+    match (locale, validity) {
+        (Locale::ZhHans, ConstitutionValidity::Unknown) => "未知或非自定义",
+        (Locale::ZhHans, ConstitutionValidity::Valid) => "有效",
+        (Locale::ZhHans, ConstitutionValidity::Invalid) => "无效",
+        (Locale::ZhHans, ConstitutionValidity::Empty) => "为空",
+        (Locale::ZhHans, ConstitutionValidity::Unreadable) => "无法读取",
+        (_, ConstitutionValidity::Unknown) => "unknown or not custom",
+        (_, ConstitutionValidity::Valid) => "valid",
+        (_, ConstitutionValidity::Invalid) => "invalid",
+        (_, ConstitutionValidity::Empty) => "empty",
+        (_, ConstitutionValidity::Unreadable) => "unreadable",
     }
 }
 
-fn posture_label(source: RuntimePostureSource) -> &'static str {
-    match source {
-        RuntimePostureSource::Unset => "not reviewed",
-        RuntimePostureSource::Inherited => "inherited from existing config",
-        RuntimePostureSource::Confirmed => "confirmed in setup",
+fn posture_label(source: RuntimePostureSource, locale: Locale) -> &'static str {
+    match (locale, source) {
+        (Locale::ZhHans, RuntimePostureSource::Unset) => "未查看",
+        (Locale::ZhHans, RuntimePostureSource::Inherited) => "继承自现有配置",
+        (Locale::ZhHans, RuntimePostureSource::Confirmed) => "已在设置中确认",
+        (_, RuntimePostureSource::Unset) => "not reviewed",
+        (_, RuntimePostureSource::Inherited) => "inherited from existing config",
+        (_, RuntimePostureSource::Confirmed) => "confirmed in setup",
     }
 }
 
@@ -483,12 +538,155 @@ fn ignored_whale_warnings(warnings: &[String]) -> Vec<&str> {
         .collect()
 }
 
-fn help_text() -> String {
-    "Usage: /constitution [status|preview|bundled|edit|review|repair|repo|explain|posture]"
-        .to_string()
+fn help_text(locale: Locale) -> String {
+    match locale {
+        Locale::ZhHans => {
+            "用法：/constitution [status|preview|bundled|edit|review|repair|repo|explain|posture]"
+        }
+        _ => {
+            "Usage: /constitution [status|preview|bundled|edit|review|repair|repo|explain|posture]"
+        }
+    }
+    .to_string()
 }
 
-const AGENTS_EXPLANATION: &str = "\
+fn manager_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "宪法",
+        _ => "Constitution",
+    }
+}
+
+fn review_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "宪法检查",
+        _ => "Constitution Review",
+    }
+}
+
+fn rendered_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "渲染后的用户宪法",
+        _ => "Rendered User Constitution",
+    }
+}
+
+fn repo_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "仓库本地宪法",
+        _ => "Repo-Local Constitution",
+    }
+}
+
+fn explanation_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "AGENTS.md 与宪法",
+        _ => "AGENTS.md vs Constitution",
+    }
+}
+
+fn no_repo_law_text(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "此工作区未找到仓库本地宪法 .codewhale/constitution.json。",
+        _ => "No repo-local constitution found at .codewhale/constitution.json for this workspace.",
+    }
+}
+
+fn inactive_preview_text(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "非活动预览：当前选择了内置/默认或专家覆盖。",
+        _ => "Inactive preview: bundled/default or expert override is selected.",
+    }
+}
+
+fn structured_empty_text(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "结构化宪法为空。",
+        _ => "The structured constitution is empty.",
+    }
+}
+
+fn missing_preview_text(locale: Locale, path: &std::path::Path) -> String {
+    match locale {
+        Locale::ZhHans => format!(
+            "未在 {} 找到结构化用户全局宪法。\n\n当前使用内置准则。使用 /constitution edit 创建引导式长期偏好，或使用 /constitution bundled 明确记录内置/默认。",
+            path.display()
+        ),
+        _ => format!(
+            "No structured user-global constitution found at {}.\n\nBundled law applies. Use /constitution edit to create guided standing preferences, or /constitution bundled to record bundled/default explicitly.",
+            path.display()
+        ),
+    }
+}
+
+fn empty_preview_text(locale: Locale, path: &std::path::Path) -> String {
+    match locale {
+        Locale::ZhHans => format!(
+            "{} 的结构化用户全局宪法为空。使用 /constitution repair 返回引导式宪法步骤。",
+            path.display()
+        ),
+        _ => format!(
+            "The structured user-global constitution at {} is empty. Use /constitution repair to return to the guided constitution step.",
+            path.display()
+        ),
+    }
+}
+
+fn invalid_preview_text(locale: Locale, path: &std::path::Path, error: &str) -> String {
+    match locale {
+        Locale::ZhHans => format!(
+            "{} 的结构化用户全局宪法无效，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式宪法步骤。",
+            path.display()
+        ),
+        _ => format!(
+            "The structured user-global constitution at {} is invalid and is not injected.\n\n{error}\n\nUse /constitution repair to return to the guided constitution step.",
+            path.display()
+        ),
+    }
+}
+
+fn unreadable_preview_text(locale: Locale, path: &std::path::Path, error: &str) -> String {
+    match locale {
+        Locale::ZhHans => format!(
+            "无法读取 {} 的结构化用户全局宪法，且不会注入。\n\n{error}\n\n使用 /constitution repair 返回引导式宪法步骤。",
+            path.display()
+        ),
+        _ => format!(
+            "The structured user-global constitution at {} could not be read and is not injected.\n\n{error}\n\nUse /constitution repair to return to the guided constitution step.",
+            path.display()
+        ),
+    }
+}
+
+fn path_error_preview_text(locale: Locale, error: &str) -> String {
+    match locale {
+        Locale::ZhHans => format!("无法为用户全局宪法解析 CODEWHALE_HOME：\n\n{error}"),
+        _ => {
+            format!("Could not resolve CODEWHALE_HOME for the user-global constitution:\n\n{error}")
+        }
+    }
+}
+
+fn agents_explanation(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => {
+            "\
+AGENTS.md 与宪法
+
+内置 Constitution 是全局系统契约：身份、权限顺序、安全边界和长期执行规则。
+
+用户全局宪法是个人长期准则。它是结构化数据，确定性渲染，并低于当前用户请求和内置 Constitution。
+
+.codewhale/constitution.json 是仓库本地准则。它属于某个工作区，并作为独立仓库宪法块渲染。
+
+AGENTS.md 和项目说明是实现指导。它们可以描述构建命令、仓库规范和本地流程，但不应替代宪法策略或原始完整提示词编辑。
+
+WHALE.md 已忽略。将普通项目说明迁移到 AGENTS.md，将 CodeWhale 专属权限策略迁移到 .codewhale/constitution.json。
+
+运行时姿态是独立设置。宪法可以建议主动性，但不会改变批准策略、沙盒、Shell、网络、信任、MCP 权限或默认模式。使用 /constitution posture 查看这些控制。"
+        }
+        _ => {
+            "\
 AGENTS.md vs constitution
 
 The bundled Constitution is the global system contract: identity, authority order, safety, and the standing execution rules.
@@ -501,7 +699,159 @@ AGENTS.md and project instructions are implementation guidance. They can describ
 
 WHALE.md is ignored. Move ordinary project instructions to AGENTS.md and CodeWhale-specific authority policy to .codewhale/constitution.json.
 
-Runtime posture is separate. A constitution can recommend autonomy, but it does not change approval policy, sandbox, shell, network, trust, MCP permissions, or default mode. Use /constitution posture to review those controls.";
+Runtime posture is separate. A constitution can recommend autonomy, but it does not change approval policy, sandbox, shell, network, trust, MCP permissions, or default mode. Use /constitution posture to review those controls."
+        }
+    }
+}
+
+struct ConstitutionManagerCopy {
+    manager_header: &'static str,
+    active_stack_header: &'static str,
+    bundled_active: &'static str,
+    user_global_label: &'static str,
+    repo_local_label: &'static str,
+    agents_label: &'static str,
+    legacy_whale_label: &'static str,
+    memory_handoff_label: &'static str,
+    memory_label: &'static str,
+    handoff_label: &'static str,
+    user_global_header: &'static str,
+    choice_label: &'static str,
+    source_label: &'static str,
+    file_label: &'static str,
+    validity_label: &'static str,
+    language_label: &'static str,
+    last_preview_label: &'static str,
+    runtime_posture_label: &'static str,
+    checkpoint_label: &'static str,
+    preview_header: &'static str,
+    preview_action: &'static str,
+    repo_action: &'static str,
+    maintenance_header: &'static str,
+    maintenance_actions: &'static [&'static str],
+    present: &'static str,
+    not_present: &'static str,
+    generated_fallback: &'static str,
+    whale_ignored: &'static str,
+    enabled: &'static str,
+    disabled: &'static str,
+    not_recorded: &'static str,
+    not_reviewed: &'static str,
+    not_completed: &'static str,
+}
+
+impl ConstitutionManagerCopy {
+    fn for_locale(locale: Locale) -> Self {
+        match locale {
+            Locale::ZhHans => Self {
+                manager_header: "宪法管理器",
+                active_stack_header: "生效层级",
+                bundled_active: "内置 Constitution：始终生效的基础准则",
+                user_global_label: "用户全局宪法",
+                repo_local_label: "仓库本地宪法",
+                agents_label: "AGENTS/项目说明",
+                legacy_whale_label: "旧版 WHALE.md",
+                memory_handoff_label: "记忆/交接",
+                memory_label: "记忆",
+                handoff_label: "交接",
+                user_global_header: "用户全局宪法",
+                choice_label: "选择",
+                source_label: "来源",
+                file_label: "文件",
+                validity_label: "有效性",
+                language_label: "语言",
+                last_preview_label: "上次接受的预览",
+                runtime_posture_label: "运行时姿态",
+                checkpoint_label: "检查点",
+                preview_header: "预览",
+                preview_action: "/constitution preview 会在存在时打开精确渲染的用户全局块。",
+                repo_action: "/constitution repo 会在存在时显示 .codewhale/constitution.json 本地准则。",
+                maintenance_header: "维护",
+                maintenance_actions: &[
+                    "编辑引导式宪法：/constitution edit",
+                    "预览渲染后的宪法：/constitution preview",
+                    "使用内置/默认：/constitution bundled",
+                    "查看现有内容：/constitution review",
+                    "修复无效/空/不可读文件：/constitution repair",
+                    "显示仓库本地准则：/constitution repo",
+                    "解释 AGENTS.md 与宪法：/constitution explain",
+                    "打开运行时姿态：/constitution posture",
+                ],
+                present: "存在",
+                not_present: "不存在",
+                generated_fallback: "生成的后备内容",
+                whale_ignored: "已忽略；需要迁移",
+                enabled: "启用",
+                disabled: "停用",
+                not_recorded: "未记录",
+                not_reviewed: "未查看",
+                not_completed: "未完成",
+            },
+            _ => Self {
+                manager_header: "Constitution Manager",
+                active_stack_header: "Active stack",
+                bundled_active: "Bundled Constitution: active base law (always on)",
+                user_global_label: "User-global constitution",
+                repo_local_label: "Repo-local constitution",
+                agents_label: "AGENTS/project instructions",
+                legacy_whale_label: "Legacy WHALE.md",
+                memory_handoff_label: "Memory/handoff",
+                memory_label: "memory",
+                handoff_label: "handoff",
+                user_global_header: "User-global constitution",
+                choice_label: "Choice",
+                source_label: "Source",
+                file_label: "File",
+                validity_label: "Validity",
+                language_label: "Language",
+                last_preview_label: "Last accepted preview",
+                runtime_posture_label: "Runtime posture",
+                checkpoint_label: "Checkpoint",
+                preview_header: "Preview",
+                preview_action: "/constitution preview opens the exact rendered user-global block when present.",
+                repo_action: "/constitution repo shows .codewhale/constitution.json local law when present.",
+                maintenance_header: "Maintenance",
+                maintenance_actions: &[
+                    "Edit guided constitution: /constitution edit",
+                    "Preview rendered constitution: /constitution preview",
+                    "Use bundled/default: /constitution bundled",
+                    "Review existing: /constitution review",
+                    "Repair invalid/empty/unreadable: /constitution repair",
+                    "Show repo-local law: /constitution repo",
+                    "Explain AGENTS.md vs constitution: /constitution explain",
+                    "Open runtime posture: /constitution posture",
+                ],
+                present: "present",
+                not_present: "not present",
+                generated_fallback: "generated fallback",
+                whale_ignored: "ignored; migration needed",
+                enabled: "enabled",
+                disabled: "disabled",
+                not_recorded: "not recorded",
+                not_reviewed: "not reviewed",
+                not_completed: "not completed",
+            },
+        }
+    }
+
+    fn location_count_unit(&self, count: usize) -> &'static str {
+        if self.manager_header == "宪法管理器" {
+            "处"
+        } else if count == 1 {
+            "location"
+        } else {
+            "locations"
+        }
+    }
+
+    fn completed_for(&self, version: &str) -> String {
+        if self.manager_header == "宪法管理器" {
+            format!("已完成 {version}")
+        } else {
+            format!("completed for {version}")
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -620,5 +970,59 @@ mod tests {
         let body = pop_pager_body(&mut app);
         assert!(body.contains("<codewhale_user_constitution"));
         assert!(body.contains("Maintains release lanes."));
+    }
+
+    #[test]
+    fn constitution_manager_uses_zh_hans_copy() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::ZhHans;
+
+        let result = ConstitutionCmd::execute(&mut app, None);
+
+        assert!(result.message.is_none());
+        let body = pop_pager_body(&mut app);
+        assert!(body.contains("宪法管理器"));
+        assert!(body.contains("生效层级"));
+        assert!(body.contains("用户全局宪法"));
+        assert!(body.contains("/constitution preview 会"));
+        assert!(!body.contains("Constitution Manager"));
+    }
+
+    #[test]
+    fn constitution_preview_missing_uses_zh_hans_copy() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::ZhHans;
+
+        let result = ConstitutionCmd::execute(&mut app, Some("preview"));
+
+        assert!(result.message.is_none());
+        let body = pop_pager_body(&mut app);
+        assert!(body.contains("未在"));
+        assert!(body.contains("当前使用内置准则"));
+        assert!(!body.contains("No structured user-global constitution"));
+    }
+
+    #[test]
+    fn constitution_explanation_uses_zh_hans_copy() {
+        let mut app = test_app();
+        app.ui_locale = crate::localization::Locale::ZhHans;
+
+        let result = ConstitutionCmd::execute(&mut app, Some("explain"));
+
+        assert!(result.message.is_none());
+        let body = pop_pager_body(&mut app);
+        assert!(body.contains("AGENTS.md 与宪法"));
+        assert!(body.contains("运行时姿态是独立设置"));
+        assert!(!body.contains("Runtime posture is separate"));
     }
 }
