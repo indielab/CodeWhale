@@ -3838,6 +3838,9 @@ fn print_doctor_setup_report(
         crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
         doctor_ready_label(update_ready)
     );
+    println!(
+        "  · next actions: /constitution (standing law), /setup report (readiness), /provider or /model (route), /config (runtime posture)"
+    );
     for step in codewhale_config::SetupStep::ALL {
         let entry = state.steps.get(&step);
         let required = entry.is_some_and(|entry| entry.required);
@@ -3893,6 +3896,12 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
             "preview_version": state.constitution_preview_version,
         },
         "runtime_posture_source": runtime_posture_source_id(state.runtime_posture_source),
+        "next_actions": {
+            "constitution": "/constitution",
+            "setup_report": "/setup report",
+            "provider_model": "/provider or /model",
+            "runtime_posture": "/config",
+        },
         "steps": steps,
     })
 }
@@ -7968,6 +7977,13 @@ mod doctor_setup_state_tests {
 
         assert_eq!(report["source"], "derived");
         assert_eq!(report["inherited"], true);
+        assert_eq!(report["next_actions"]["constitution"], "/constitution");
+        assert_eq!(report["next_actions"]["setup_report"], "/setup report");
+        assert_eq!(
+            report["next_actions"]["provider_model"],
+            "/provider or /model"
+        );
+        assert_eq!(report["next_actions"]["runtime_posture"], "/config");
         assert_eq!(
             report["checkpoint_version"],
             crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION

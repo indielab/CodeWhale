@@ -694,6 +694,10 @@ pub fn format_context_report(report: &PromptSourceMap) -> String {
         "Source-entry total: {} tokens",
         report.total_estimated_tokens
     );
+    let _ = writeln!(
+        out,
+        "Manage standing law: /constitution (status/preview), /constitution repo (repo-local law), /setup report (readiness)."
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Sources:");
     for entry in &report.entries {
@@ -853,6 +857,8 @@ mod tests {
         let formatted = format_context_report(&report);
         assert!(formatted.contains("Repository constitution"));
         assert!(formatted.contains("Project context warnings"));
+        assert!(formatted.contains("/constitution"));
+        assert!(formatted.contains("/setup report"));
         let json = context_report_json(&report);
         assert!(json.contains("\"repo_constitution\""));
         assert!(json.contains("branch_policy appears stale"));
