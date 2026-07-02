@@ -761,26 +761,6 @@ pub(super) const MAX_SSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// before any transcript-level spillover applies.
 pub(super) const MAX_MCP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Read an HTTP response body into a string, aborting if it exceeds `max`
-/// bytes. Streams chunk-by-chunk so a huge/endless body never fully
-/// materializes in memory.
-pub(super) async fn read_body_capped(
-    response: reqwest::Response,
-    max: usize,
-) -> anyhow::Result<String> {
-    use futures_util::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if buf.len().saturating_add(chunk.len()) > max {
-            anyhow::bail!("MCP response body exceeded {max} bytes — aborting");
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
 fn sse_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     let value = line.strip_prefix(field)?;
     Some(value.strip_prefix(' ').unwrap_or(value))

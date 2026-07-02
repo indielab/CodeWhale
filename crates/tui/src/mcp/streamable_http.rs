@@ -115,9 +115,21 @@ impl StreamableHttpTransport {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = super::read_body_capped(response, super::MAX_MCP_RESPONSE_BYTES)
+        // Reject an over-large declared body before reading it into memory
+        // (OOM guard). `.text()` is kept for the read itself so connection
+        // framing behaves exactly as before.
+        if let Some(len) = response.content_length()
+            && len > super::MAX_MCP_RESPONSE_BYTES as u64
+        {
+            return Err(StreamableSendError::Other(anyhow::anyhow!(
+                "MCP response Content-Length {len} exceeds {} bytes — aborting",
+                super::MAX_MCP_RESPONSE_BYTES
+            )));
+        }
+        let body = response
+            .text()
             .await
-            .map_err(StreamableSendError::Other)?;
+            .map_err(|err| StreamableSendError::Other(err.into()))?;
         self.store_response_body(content_type.as_deref(), &body)
             .map_err(StreamableSendError::Other)
     }
